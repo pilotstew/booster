@@ -190,7 +190,16 @@ func recoverFido2Password(devName string, credential string, salt string, relyin
 		prompt := "Enter PIN for " + device + ":"
 		if strings.HasPrefix(string(buff), prompt) {
 			// fido2-assert tool requests for PIN
-			pin, err := readPassword(prompt, "")
+			var pin []byte
+			var err error
+			if plymouthEnabled {
+				pin, err = plymouthAskPassword(prompt)
+				if err != nil {
+					pin, err = readPassword(prompt, "")
+				}
+			} else {
+				pin, err = readPassword(prompt, "")
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -240,6 +249,15 @@ func recoverSystemdFido2Password(t luks.Token) ([]byte, error) {
 		return nil, err
 	}
 
+	// Build set of devices present at scan time. Once all have been tried
+	// without success we return rather than blocking forever on the channel
+	// waiting for a device that may never arrive.
+	initialDevices := make(set)
+	for _, d := range dir {
+		initialDevices[d.Name()] = true
+	}
+	initialDone := 0
+
 	go func() {
 		for _, d := range dir {
 			// run it in a separate goroutine to avoid blocking on channel
@@ -255,10 +273,35 @@ func recoverSystemdFido2Password(t luks.Token) ([]byte, error) {
 		}
 		seenHidrawDevices[devName] = true
 
-		password, err := recoverFido2Password(devName, node.Credential, node.Salt, node.RelyingParty, node.PinRequired, node.UserPresenceRequired, node.UserVerificationRequired)
+		maxAttempts := 1
+		if node.PinRequired {
+			maxAttempts = 3
+		}
+		var password []byte
+		var err error
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			password, err = recoverFido2Password(devName, node.Credential, node.Salt, node.RelyingParty, node.PinRequired, node.UserPresenceRequired, node.UserVerificationRequired)
+			if err == nil {
+				break
+			}
+			if !strings.Contains(err.Error(), "PIN_INVALID") {
+				break
+			}
+			if attempt < maxAttempts-1 {
+				warning("FIDO2 PIN incorrect, please try again")
+			}
+		}
+		if initialDevices[devName] {
+			initialDone++
+		}
 		if err != nil {
 			if err != io.EOF {
 				info("%v", err)
+			}
+			if initialDone >= len(initialDevices) {
+				// All devices present at boot have been tried. Stop blocking
+				// the channel so the keyboard fallback can start promptly.
+				break
 			}
 			continue
 		}
@@ -324,7 +367,7 @@ func recoverSystemdTPM2Password(t luks.Token) ([]byte, error) {
 	return []byte(base64.StdEncoding.EncodeToString(password)), nil
 }
 
-func recoverTokenPassword(volumes chan *luks.Volume, d luks.Device, t luks.Token) {
+func recoverTokenPassword(volumes chan *luks.Volume, d luks.Device, t luks.Token) bool {
 	var password []byte
 	var err error
 
@@ -337,12 +380,12 @@ func recoverTokenPassword(volumes chan *luks.Volume, d luks.Device, t luks.Token
 		password, err = recoverSystemdTPM2Password(t)
 	default:
 		info("token #%d has unknown type: %s", t.ID, t.Type)
-		return
+		return false
 	}
 
 	if err != nil {
 		warning("recovering %s token #%d failed: %v", t.Type, t.ID, err)
-		return
+		return false
 	}
 
 	info("recovered password from %s token #%d", t.Type, t.ID)
@@ -357,9 +400,10 @@ func recoverTokenPassword(volumes chan *luks.Volume, d luks.Device, t luks.Token
 		}
 		info("password from %s token #%d matches", t.Type, t.ID)
 		volumes <- v
-		return
+		return true
 	}
 	info("password from %s token #%d does not match", t.Type, t.ID)
+	return false
 }
 
 func recoverKeyfilePassword(volumes chan *luks.Volume, d luks.Device, checkSlots []int, mappingName string, keyfile string) {
@@ -516,8 +560,10 @@ func luksOpen(dev string, mapping *luksMapping) error {
 		if hasPriority && priorityTypes[t.Type] {
 			tokenWg.Add(1)
 			go func(tok luks.Token) {
-				defer tokenWg.Done()
-				recoverTokenPassword(volumes, d, tok)
+				if recoverTokenPassword(volumes, d, tok) {
+					closeDone.Do(func() { close(done) })
+				}
+				tokenWg.Done()
 			}(t)
 		} else {
 			go recoverTokenPassword(volumes, d, t)
