@@ -120,7 +120,7 @@ func isHidRawFido2(devName string) (bool, error) {
 	return false, nil
 }
 
-func recoverFido2Password(devName string, credential string, salt string, relyingParty string, pinRequired bool, userPresenceRequired bool, userVerificationRequired bool) ([]byte, error) {
+func recoverFido2Password(devName string, credential string, salt string, relyingParty string, pinRequired bool, userPresenceRequired bool, userVerificationRequired bool, mappingName string) ([]byte, error) {
 	usbhidWg.Wait()
 
 	isFido2, err := isHidRawFido2(devName)
@@ -187,18 +187,19 @@ func recoverFido2Password(devName string, credential string, salt string, relyin
 		}
 		// Dealing with Yubikey using command-line tools is getting out of control
 		// TODO: find a way to do the same using libfido2
-		prompt := "Enter PIN for " + device + ":"
-		if strings.HasPrefix(string(buff), prompt) {
+		fido2Prompt := "Enter PIN for " + device + ":"
+		displayPrompt := "Enter FIDO2 PIN for " + mappingName + ":"
+		if strings.HasPrefix(string(buff), fido2Prompt) {
 			// fido2-assert tool requests for PIN
 			var pin []byte
 			var err error
 			if plymouthEnabled {
-				pin, err = plymouthAskPassword(prompt)
+				pin, err = plymouthAskPassword(displayPrompt)
 				if err != nil {
-					pin, err = readPassword(prompt, "")
+					pin, err = readPassword(displayPrompt, "")
 				}
 			} else {
-				pin, err = readPassword(prompt, "")
+				pin, err = readPassword(displayPrompt, "")
 			}
 			if err != nil {
 				return nil, err
@@ -227,7 +228,7 @@ func recoverFido2Password(devName string, credential string, salt string, relyin
 
 var hidrawDevices = make(chan string, 10) // channel that receives 'add hidraw' events
 
-func recoverSystemdFido2Password(t luks.Token) ([]byte, error) {
+func recoverSystemdFido2Password(t luks.Token, mappingName string) ([]byte, error) {
 	var node struct {
 		Credential               string `json:"fido2-credential"` // base64
 		Salt                     string `json:"fido2-salt"`       // base64
@@ -280,7 +281,7 @@ func recoverSystemdFido2Password(t luks.Token) ([]byte, error) {
 		var password []byte
 		var err error
 		for attempt := 0; attempt < maxAttempts; attempt++ {
-			password, err = recoverFido2Password(devName, node.Credential, node.Salt, node.RelyingParty, node.PinRequired, node.UserPresenceRequired, node.UserVerificationRequired)
+			password, err = recoverFido2Password(devName, node.Credential, node.Salt, node.RelyingParty, node.PinRequired, node.UserPresenceRequired, node.UserVerificationRequired, mappingName)
 			if err == nil {
 				break
 			}
@@ -367,7 +368,7 @@ func recoverSystemdTPM2Password(t luks.Token) ([]byte, error) {
 	return []byte(base64.StdEncoding.EncodeToString(password)), nil
 }
 
-func recoverTokenPassword(volumes chan *luks.Volume, d luks.Device, t luks.Token) bool {
+func recoverTokenPassword(volumes chan *luks.Volume, d luks.Device, t luks.Token, mappingName string) bool {
 	var password []byte
 	var err error
 
@@ -375,7 +376,7 @@ func recoverTokenPassword(volumes chan *luks.Volume, d luks.Device, t luks.Token
 	case "clevis":
 		password, err = recoverClevisPassword(t, d.Version())
 	case "systemd-fido2":
-		password, err = recoverSystemdFido2Password(t)
+		password, err = recoverSystemdFido2Password(t, mappingName)
 	case "systemd-tpm2":
 		password, err = recoverSystemdTPM2Password(t)
 	default:
@@ -560,13 +561,13 @@ func luksOpen(dev string, mapping *luksMapping) error {
 		if hasPriority && priorityTypes[t.Type] {
 			tokenWg.Add(1)
 			go func(tok luks.Token) {
-				if recoverTokenPassword(volumes, d, tok) {
+				if recoverTokenPassword(volumes, d, tok, mapping.name) {
 					closeDone.Do(func() { close(done) })
 				}
 				tokenWg.Done()
 			}(t)
 		} else {
-			go recoverTokenPassword(volumes, d, t)
+			go recoverTokenPassword(volumes, d, t, mapping.name)
 		}
 		for _, s := range t.Slots {
 			slotsWithTokens[s] = true
