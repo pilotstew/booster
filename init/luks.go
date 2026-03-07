@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -9,11 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -127,106 +124,51 @@ func recoverFido2Password(devName string, credential string, salt string, relyin
 	if err != nil {
 		return nil, fmt.Errorf("unable to check whether %s is a FIDO2 device", devName)
 	}
-
 	if !isFido2 {
 		return nil, fmt.Errorf("HID %s is not a FIDO2 device", devName)
 	}
 
 	info("HID %s supports FIDO, trying it to recover the password", devName)
 
-	var challenge strings.Builder
-	const zeroString = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" // 32byte zero string encoded as hex, hex.EncodeToString(make([]byte, 32))
-	challenge.WriteString(zeroString)                                 // client data, an empty string
-	challenge.WriteRune('\n')
-	challenge.WriteString(relyingParty)
-	challenge.WriteRune('\n')
-	challenge.WriteString(credential)
-	challenge.WriteRune('\n')
-	challenge.WriteString(salt)
-	challenge.WriteRune('\n')
+	credID, err := base64.StdEncoding.DecodeString(credential)
+	if err != nil {
+		return nil, fmt.Errorf("invalid credential: %v", err)
+	}
+	saltBytes, err := base64.StdEncoding.DecodeString(salt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid salt: %v", err)
+	}
 
-	device := "/dev/" + devName
-	args := []string{"-G", "-h", device}
-	if userPresenceRequired {
-		args = append(args, "-t", "up=true")
-	}
-	if userVerificationRequired {
-		args = append(args, "-t", "uv=true")
-	}
+	var pin string
 	if pinRequired {
-		args = append(args, "-t", "pin=true")
-	}
-
-	cmd := exec.Command("fido2-assert", args...)
-	pipeOut, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	pipeErr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
-	pipeIn, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	if _, err := pipeIn.Write([]byte(challenge.String())); err != nil {
-		return nil, err
-	}
-
-	if pinRequired {
-		// wait till the command requests the pin
-		buff := make([]byte, 500)
-		if _, err := pipeErr.Read(buff); err != nil {
+		waitForPlymouthInit()
+		prompt := "Enter FIDO2 PIN for " + mappingName + ":"
+		var pinBytes []byte
+		if plymouthEnabled {
+			pinBytes, err = plymouthAskPassword(prompt)
+			if err != nil {
+				pinBytes, err = readPassword(prompt, "")
+			}
+		} else {
+			pinBytes, err = readPassword(prompt, "")
+		}
+		if err != nil {
 			return nil, err
 		}
-		// Dealing with Yubikey using command-line tools is getting out of control
-		// TODO: find a way to do the same using libfido2
-		fido2Prompt := "Enter PIN for " + device + ":"
-		displayPrompt := "Enter FIDO2 PIN for " + mappingName + ":"
-		if strings.HasPrefix(string(buff), fido2Prompt) {
-			// fido2-assert tool requests for PIN
-			var pin []byte
-			var err error
-			if plymouthEnabled {
-				pin, err = plymouthAskPassword(displayPrompt)
-				if err != nil {
-					pin, err = readPassword(displayPrompt, "")
-				}
-			} else {
-				pin, err = readPassword(displayPrompt, "")
-			}
-			if err != nil {
-				return nil, err
-			}
-			pin = append(pin, '\n')
-			if _, err := pipeIn.Write(pin); err != nil {
-				return nil, err
-			}
-		}
+		pin = string(pinBytes)
 	}
 
-	content, err := io.ReadAll(pipeOut)
-	if err != nil {
-		return nil, err
-	}
-	lines := bytes.Split(content, []byte{'\n'})
-	if len(lines) < 5 {
-		msg, _ := io.ReadAll(pipeErr)
-		msg = bytes.TrimRight(msg, "\n")
-		return nil, fmt.Errorf("%s", string(msg))
-	}
-
-	// hmac is the 5th line in the output
-	return lines[4], nil
+	return fido2Assertion("/dev/"+devName, credID, saltBytes, relyingParty, pin, pinRequired, userPresenceRequired, userVerificationRequired)
 }
 
 var hidrawDevices = make(chan string, 10) // channel that receives 'add hidraw' events
+
+// passphraseCache stores passwords that have successfully unlocked a LUKS
+// volume so they can be tried silently against other volumes before prompting.
+var passphraseCache struct {
+	sync.Mutex
+	passwords [][]byte
+}
 
 func recoverSystemdFido2Password(t luks.Token, mappingName string) ([]byte, error) {
 	var node struct {
@@ -285,19 +227,24 @@ func recoverSystemdFido2Password(t luks.Token, mappingName string) ([]byte, erro
 			if err == nil {
 				break
 			}
-			if !strings.Contains(err.Error(), "PIN_INVALID") {
+			if !isFido2PinInvalidError(err) {
 				break
 			}
 			if attempt < maxAttempts-1 {
-				warning("FIDO2 PIN incorrect, please try again")
+				if plymouthEnabled {
+					plymouthMessage("FIDO2 PIN incorrect, please try again")
+				} else {
+					warning("FIDO2 PIN incorrect, please try again")
+				}
 			}
 		}
 		if initialDevices[devName] {
 			initialDone++
 		}
 		if err != nil {
-			if err != io.EOF {
-				info("%v", err)
+			info("%v", err)
+			if plymouthEnabled {
+				plymouthMessage("") // clear any "PIN incorrect" message
 			}
 			if initialDone >= len(initialDevices) {
 				// All devices present at boot have been tried. Stop blocking
@@ -305,6 +252,9 @@ func recoverSystemdFido2Password(t luks.Token, mappingName string) ([]byte, erro
 				break
 			}
 			continue
+		}
+		if plymouthEnabled {
+			plymouthMessage("") // clear any "PIN incorrect" message on success
 		}
 		return password, nil
 	}
@@ -451,11 +401,37 @@ func recoverKeyfilePassword(volumes chan *luks.Volume, d luks.Device, checkSlots
 	requestKeyboardPassword(volumes, d, checkSlots, mappingName)
 }
 
+func tryPassphraseAgainstSlots(volumes chan *luks.Volume, d luks.Device, checkSlots []int, password []byte) bool {
+	for _, s := range checkSlots {
+		v, err := d.UnsealVolume(s, password)
+		if err == luks.ErrPassphraseDoesNotMatch {
+			continue
+		} else if err != nil {
+			warning("unlocking slot %v: %v", s, err)
+			continue
+		}
+		volumes <- v
+		return true
+	}
+	return false
+}
+
 func requestKeyboardPassword(volumes chan *luks.Volume, d luks.Device, checkSlots []int, mappingName string) {
 	// Wait for plymouth initialization to complete before attempting to use
 	// it. Without this, udev events can trigger LUKS password prompts while
 	// plymouthd is still starting, causing the graphical prompt to fail.
 	waitForPlymouthInit()
+
+	// Try passwords that already unlocked another volume before prompting.
+	passphraseCache.Lock()
+	cached := append([][]byte(nil), passphraseCache.passwords...)
+	passphraseCache.Unlock()
+
+	for _, pw := range cached {
+		if tryPassphraseAgainstSlots(volumes, d, checkSlots, pw) {
+			return
+		}
+	}
 
 	for {
 		prompt := fmt.Sprintf("Enter passphrase for %s:", mappingName)
@@ -481,15 +457,10 @@ func requestKeyboardPassword(volumes chan *luks.Volume, d luks.Device, checkSlot
 			continue
 		}
 
-		for _, s := range checkSlots {
-			v, err := d.UnsealVolume(s, password)
-			if err == luks.ErrPassphraseDoesNotMatch {
-				continue
-			} else if err != nil {
-				warning("unlocking slot %v: %v", s, err)
-				continue
-			}
-			volumes <- v
+		if tryPassphraseAgainstSlots(volumes, d, checkSlots, password) {
+			passphraseCache.Lock()
+			passphraseCache.passwords = append(passphraseCache.passwords, password)
+			passphraseCache.Unlock()
 			return
 		}
 
