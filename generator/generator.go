@@ -25,7 +25,7 @@ type generatorConfig struct {
 	compression             string
 	timeout                 time.Duration
 	extraFiles              []string
-	crypttabFile            string // path to crypttab on host; empty = use default /etc/crypttab.initramfs
+	crypttabFile            string // explicit crypttab path (--crypttab flag); empty = read /etc/crypttab filtered by x-initrd.attach
 	output                  string
 	forceOverwrite          bool // overwrite output file
 	initBinary              string
@@ -117,12 +117,31 @@ func generateInitRamfs(conf *generatorConfig) error {
 		return err
 	}
 
-	crypttabPath := conf.crypttabFile
-	if crypttabPath == "" {
-		crypttabPath = "/etc/crypttab.initramfs"
+	var hasFido2 bool
+	if conf.crypttabFile != "" {
+		if err := img.appendCrypttabFrom(conf.crypttabFile); err != nil {
+			return err
+		}
+		var err error
+		hasFido2, err = crypttabHasFido2(conf.crypttabFile)
+		if err != nil {
+			return err
+		}
+	} else {
+		if err := img.appendCrypttab(); err != nil {
+			return err
+		}
+		var err error
+		hasFido2, err = crypttabHasFido2Filtered(systemCrypttabPath())
+		if err != nil {
+			return err
+		}
 	}
-	if err := img.appendCrypttabFrom(crypttabPath); err != nil {
-		return err
+	if hasFido2 {
+		pluginPath := filepath.Join(filepath.Dir(conf.initBinary), "fido2plugin.so")
+		if err := img.AppendFile(pluginPath); err != nil {
+			return fmt.Errorf("fido2 plugin %s: %v", pluginPath, err)
+		}
 	}
 
 	kmod, err := NewKmod(conf)
