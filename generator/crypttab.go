@@ -36,48 +36,6 @@ func hasXInitrdAttach(optStr string) bool {
 	return false
 }
 
-// crypttabHasFido2 reports whether hostPath contains any active crypttab entry
-// that requests FIDO2 token unlock via the fido2-device= option.
-func crypttabHasFido2(hostPath string) (bool, error) {
-	return scanCrypttabFido2(hostPath, false)
-}
-
-// crypttabHasFido2Filtered is like crypttabHasFido2 but only considers entries
-// marked with x-initrd.attach.
-func crypttabHasFido2Filtered(hostPath string) (bool, error) {
-	return scanCrypttabFido2(hostPath, true)
-}
-
-func scanCrypttabFido2(hostPath string, xInitrdOnly bool) (bool, error) {
-	content, err := os.ReadFile(hostPath)
-	if os.IsNotExist(err) || os.IsPermission(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	for _, line := range strings.Split(string(content), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		opts := fields[3]
-		if xInitrdOnly && !hasXInitrdAttach(opts) {
-			continue
-		}
-		for _, opt := range strings.Split(opts, ",") {
-			if strings.HasPrefix(strings.TrimSpace(opt), "fido2-device=") {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
 // bundleCrypttabAssets bundles keyfiles and detached LUKS headers referenced
 // by active (non-noauto) entries in content into the image.
 func (img *Image) bundleCrypttabAssets(content []byte) error {

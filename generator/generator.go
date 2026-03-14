@@ -117,31 +117,12 @@ func generateInitRamfs(conf *generatorConfig) error {
 		return err
 	}
 
-	var hasFido2 bool
-	if conf.crypttabFile != "" {
-		if err := img.appendCrypttabFrom(conf.crypttabFile); err != nil {
-			return err
-		}
-		var err error
-		hasFido2, err = crypttabHasFido2(conf.crypttabFile)
-		if err != nil {
-			return err
-		}
-	} else {
-		if err := img.appendCrypttab(); err != nil {
-			return err
-		}
-		var err error
-		hasFido2, err = crypttabHasFido2Filtered(systemCrypttabPath())
-		if err != nil {
-			return err
-		}
+	crypttabPath := conf.crypttabFile
+	if crypttabPath == "" {
+		crypttabPath = "/etc/crypttab.initramfs"
 	}
-	if hasFido2 {
-		pluginPath := filepath.Join(filepath.Dir(conf.initBinary), "fido2plugin.so")
-		if err := img.AppendFile(pluginPath); err != nil {
-			return fmt.Errorf("fido2 plugin %s: %v", pluginPath, err)
-		}
+	if err := img.appendCrypttabFrom(crypttabPath); err != nil {
+		return err
 	}
 
 	kmod, err := NewKmod(conf)
