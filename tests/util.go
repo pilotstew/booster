@@ -464,8 +464,22 @@ func compileBinaries(dir string) error {
 		return fmt.Errorf("Cannot build init binary: %v", unwrapExitError(err))
 	}
 
+	// Build fido2plugin.so alongside the init binary
+	if err := os.Chdir("fido2plugin"); err != nil {
+		return err
+	}
+	cmd = exec.Command("go", "build", "-buildmode=plugin", "-o", dir+"/fido2plugin.so")
+	if testing.Verbose() {
+		log.Print("Call 'go build' for fido2plugin")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("Cannot build fido2plugin: %v", unwrapExitError(err))
+	}
+
 	// Generate initramfs
-	if err := os.Chdir("../generator"); err != nil {
+	if err := os.Chdir("../../generator"); err != nil {
 		return err
 	}
 	cmd = exec.Command("go", "build", "-o", dir+"/generator", "-tags", "test", raceFlag)
