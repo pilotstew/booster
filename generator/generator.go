@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cavaliergopher/cpio"
@@ -114,6 +115,15 @@ func generateInitRamfs(conf *generatorConfig) error {
 
 	if err := img.appendExtraFiles(conf.extraFiles...); err != nil {
 		return err
+	}
+
+	if hasFido2, err := crypttabHasFido2("/etc/crypttab"); err != nil {
+		return err
+	} else if hasFido2 {
+		pluginPath := filepath.Join(filepath.Dir(conf.initBinary), "fido2plugin.so")
+		if err := img.AppendFile(pluginPath); err != nil {
+			return fmt.Errorf("fido2 plugin %s: %v", pluginPath, err)
+		}
 	}
 
 	kmod, err := NewKmod(conf)
@@ -462,6 +472,34 @@ func (img *Image) appendInitConfig(conf *generatorConfig, kmod *Kmod, vconsole *
 	}
 
 	return img.AppendContent(initConfigPath, 0o644, content)
+}
+
+// crypttabHasFido2 reports whether /etc/crypttab contains any entry that
+// requests FIDO2 token unlock via the fido2-device= option.
+func crypttabHasFido2(path string) (bool, error) {
+	content, err := os.ReadFile(path)
+	if os.IsNotExist(err) || os.IsPermission(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		for _, opt := range strings.Split(fields[3], ",") {
+			if strings.HasPrefix(strings.TrimSpace(opt), "fido2-device=") {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (img *Image) appendAliasesFile(aliases []alias) error {
