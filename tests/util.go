@@ -337,6 +337,12 @@ func buildVmInstance(t *testing.T, opts Opts) (*vmtest.Qemu, error) {
 	if opts.kernelVersion == "" {
 		if kernel, ok := kernelVersions["linux"]; ok {
 			opts.kernelVersion = kernel
+		} else if len(kernelVersions) > 0 {
+			// Fall back to any available kernel (e.g. linux-cachyos on CachyOS systems).
+			for _, ver := range kernelVersions {
+				opts.kernelVersion = ver
+				break
+			}
 		} else {
 			require.Fail(t, "System does not have 'linux' package installed needed for the integration tests")
 		}
