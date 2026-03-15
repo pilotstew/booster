@@ -481,10 +481,15 @@ func (img *Image) addPlymouthSupport(conf *generatorConfig) error {
 	if err := img.appendExtraFiles(
 		"/bin/plymouth",
 		"/sbin/plymouthd",
-		"/usr/libexec/plymouth/plymouthd-fd-escrow",
 	); err != nil {
 		conf.enablePlymouth = false
 		return err
+	}
+	// plymouthd-fd-escrow is optional — not present in all Plymouth builds
+	if _, err := os.Stat("/usr/libexec/plymouth/plymouthd-fd-escrow"); err == nil {
+		if err := img.appendExtraFiles("/usr/libexec/plymouth/plymouthd-fd-escrow"); err != nil {
+			warning("failed to include plymouthd-fd-escrow: %v", err)
+		}
 	}
 
 	pluginCmd := exec.Command("plymouth", "--get-splash-plugin-path")
