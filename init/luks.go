@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anatol/clevis.go"
@@ -29,6 +30,14 @@ type luksMapping struct {
 	name    string
 	keyfile string
 	options []string
+}
+
+// passphraseCache holds passwords that successfully unlocked a LUKS volume during
+// this boot, so subsequent volumes (e.g. btrfs RAID1 members) can be tried
+// automatically without prompting the user again.
+var passphraseCache struct {
+	sync.Mutex
+	passwords [][]byte
 }
 
 // rd luks options match systemd naming https://www.freedesktop.org/software/systemd/man/crypttab.html
@@ -408,6 +417,27 @@ func requestKeyboardPassword(volumes chan *luks.Volume, d luks.Device, checkSlot
 	// plymouthd is still starting, causing the graphical prompt to fail.
 	waitForPlymouthInit()
 
+	// Fast path: try passwords that already unlocked another volume this boot
+	// (e.g. two LUKS members of a btrfs RAID1 with the same passphrase).
+	passphraseCache.Lock()
+	cached := make([][]byte, len(passphraseCache.passwords))
+	copy(cached, passphraseCache.passwords)
+	passphraseCache.Unlock()
+
+	for _, pw := range cached {
+		for _, s := range checkSlots {
+			v, err := d.UnsealVolume(s, pw)
+			if err == luks.ErrPassphraseDoesNotMatch {
+				continue
+			} else if err != nil {
+				warning("unlocking slot %v: %v", s, err)
+				continue
+			}
+			volumes <- v
+			return
+		}
+	}
+
 	for {
 		prompt := fmt.Sprintf("Enter passphrase for %s:", mappingName)
 
@@ -440,6 +470,9 @@ func requestKeyboardPassword(volumes chan *luks.Volume, d luks.Device, checkSlot
 				warning("unlocking slot %v: %v", s, err)
 				continue
 			}
+			passphraseCache.Lock()
+			passphraseCache.passwords = append(passphraseCache.passwords, password)
+			passphraseCache.Unlock()
 			volumes <- v
 			return
 		}
