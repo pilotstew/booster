@@ -459,9 +459,6 @@ func compileBinaries(dir string) error {
 	}
 	cmd := exec.Command("go", "build", "-o", dir+"/init", "-tags", "test", raceFlag)
 	cmd.Env = os.Environ()
-	if !israce.Enabled {
-		cmd.Env = append(cmd.Env, "CGO_ENABLED=0")
-	}
 	if testing.Verbose() {
 		log.Print("Call 'go build' for init")
 		cmd.Stdout = os.Stdout
