@@ -181,9 +181,11 @@ func generateInitRamfs(workDir string, opts Opts) (string, error) {
 	if opts.modulesDirectory != "" {
 		generatorArgs = append(generatorArgs, "--modules-dir", opts.modulesDirectory)
 	}
-	if opts.crypttabFile != "" {
-		generatorArgs = append(generatorArgs, "--crypttab", opts.crypttabFile)
+	crypttabArg := opts.crypttabFile
+	if crypttabArg == "" {
+		crypttabArg = "/dev/null" // tests run without root; avoid reading /etc/crypttab
 	}
+	generatorArgs = append(generatorArgs, "--crypttab", crypttabArg)
 	generatorArgs = append(generatorArgs, output)
 	cmd := exec.Command(binariesDir+"/generator", generatorArgs...)
 	if testing.Verbose() {
