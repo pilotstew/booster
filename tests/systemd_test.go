@@ -9,6 +9,15 @@ import (
 )
 
 func TestSystemdFido2(t *testing.T) {
+	// Check prerequisites before starting QEMU or touching hardware.
+	// PIN is read from the environment to avoid hardcoding it in source.
+	// Set BOOSTER_TEST_FIDO2_PIN to the PIN on your FIDO2 device before running.
+	// Tip: use read -s to avoid shell history: read -s BOOSTER_TEST_FIDO2_PIN && sudo -E BOOSTER_TEST_FIDO2_PIN=$BOOSTER_TEST_FIDO2_PIN go test -run TestSystemdFido2
+	pin := os.Getenv("BOOSTER_TEST_FIDO2_PIN")
+	if pin == "" {
+		t.Skip("BOOSTER_TEST_FIDO2_PIN not set")
+	}
+
 	yubikeys, err := detectYubikeys()
 	require.NoError(t, err)
 	if len(yubikeys) == 0 {
@@ -27,14 +36,6 @@ func TestSystemdFido2(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer vm.Shutdown()
-
-	// PIN is read from the environment to avoid hardcoding it in source.
-	// Set BOOSTER_TEST_FIDO2_PIN to the PIN on your FIDO2 device before running.
-	// Tip: use read -s to avoid shell history: read -s BOOSTER_TEST_FIDO2_PIN && sudo -E BOOSTER_TEST_FIDO2_PIN=$BOOSTER_TEST_FIDO2_PIN go test -run TestSystemdFido2
-	pin := os.Getenv("BOOSTER_TEST_FIDO2_PIN")
-	if pin == "" {
-		t.Skip("BOOSTER_TEST_FIDO2_PIN not set")
-	}
 	// there can be multiple Yubikeys, iterate over all "Enter FIDO2 PIN" requests
 	re, err := regexp.Compile(`(Enter FIDO2 PIN for |Hello, booster!)`)
 	require.NoError(t, err)
