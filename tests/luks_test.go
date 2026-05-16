@@ -3,6 +3,7 @@ package tests
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -95,6 +96,10 @@ const (
 	luksRaid1LuksUUID1 = "d7fb15c9-4e6a-4901-cd3f-3a579bdf1357"
 	luksRaid1LuksUUID2 = "e8ac26da-5f7b-4012-de40-4b68ace02468"
 	luksRaid1FsUUID    = "f9bd37eb-607c-4123-ef51-5c79bdf13579"
+
+	luksRaid1DistinctLuksUUID1 = "9b5d8ac8-342b-423d-b253-3d3a5403fee8"
+	luksRaid1DistinctLuksUUID2 = "461f9179-04f9-4def-9731-ac1598824026"
+	luksRaid1DistinctFsUUID    = "aef9c3f8-2fbe-476f-b732-99f31226d601"
 )
 
 // TestPassphraseCache verifies that when two LUKS devices share the same
@@ -152,6 +157,59 @@ func TestLuksBtrfsRaid1(t *testing.T) {
 	require.NoError(t, vm.ConsoleExpect("Enter passphrase for"))
 	require.NoError(t, vm.ConsoleWrite("1234\n"))
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
+}
+
+// TestLuksBtrfsRaid1DistinctPass is the issue #283 different-passphrase case:
+// a btrfs RAID1 whose two LUKS2 members have DIFFERENT passphrases. The
+// passphrase cache cannot help here, so booster must prompt for each member
+// separately (serialized by keyboardMu, never interleaved) and btrfs must
+// still assemble once both are unlocked. Both members must be unlocked before
+// root mounts, so a regression (cache wrongly suppressing the second prompt,
+// or a member never prompted) hangs the boot and times the test out.
+//
+// Device discovery order is not deterministic, so the prompt for member 1 vs
+// member 2 can arrive in either order; the loop routes the matching passphrase
+// by the crypttab mapping name in the prompt and asserts each member is
+// prompted exactly once.
+func TestLuksBtrfsRaid1DistinctPass(t *testing.T) {
+	require.NoError(t, checkAsset("assets/luks2.btrfs_raid1_distinct.img"))
+
+	crypttabPath := filepath.Join(t.TempDir(), "crypttab")
+	require.NoError(t, os.WriteFile(crypttabPath, []byte(
+		"luks-btrfs1 UUID="+luksRaid1DistinctLuksUUID1+" none x-initrd.attach\n"+
+			"luks-btrfs2 UUID="+luksRaid1DistinctLuksUUID2+" none x-initrd.attach\n",
+	), 0o644))
+
+	vm, err := buildVmInstance(t, Opts{
+		disk:         "assets/luks2.btrfs_raid1_distinct.img",
+		kernelArgs:   []string{"root=UUID=" + luksRaid1DistinctFsUUID},
+		crypttabFile: crypttabPath,
+	})
+	require.NoError(t, err)
+	defer vm.Shutdown()
+
+	passwords := map[string]string{
+		"Enter passphrase for luks-btrfs1:": "1111",
+		"Enter passphrase for luks-btrfs2:": "2222",
+	}
+	// ConsoleExpectRE returns submatch group 1, so the whole alternation is
+	// wrapped in one group; matches[0] is the matched alternative verbatim.
+	re, err := regexp.Compile(`(Enter passphrase for luks-btrfs1:|Enter passphrase for luks-btrfs2:|Hello, booster!)`)
+	require.NoError(t, err)
+
+	prompted := make(map[string]bool)
+	for {
+		matches, err := vm.ConsoleExpectRE(re)
+		require.NoError(t, err)
+		m := matches[0]
+		if m == "Hello, booster!" {
+			break
+		}
+		require.False(t, prompted[m], "%q seen more than once (passphrase cache leaked across distinct passphrases?)", m)
+		prompted[m] = true
+		require.NoError(t, vm.ConsoleWrite(passwords[m]+"\n"))
+	}
+	require.Len(t, prompted, 2, "both btrfs members must be prompted exactly once")
 }
 
 const (

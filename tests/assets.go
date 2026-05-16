@@ -101,6 +101,17 @@ var assetGenerators = map[string]assetGenerator{
 		"FS_UUID=f9bd37eb-607c-4123-ef51-5c79bdf13579",
 		"LUKS_PASSWORD=1234",
 	}},
+	// luks2.btrfs_raid1_distinct.img: like luks2.btrfs_raid1.img but the two
+	// LUKS2 members have DIFFERENT passphrases. Used by
+	// TestLuksBtrfsRaid1DistinctPass for the issue #283 different-passphrase
+	// path (passphrase cache can't help; each member prompts separately).
+	"luks2.btrfs_raid1_distinct.img": {"luks_btrfs_raid1_distinct.sh", []string{
+		"LUKS_UUID1=9b5d8ac8-342b-423d-b253-3d3a5403fee8",
+		"LUKS_UUID2=461f9179-04f9-4def-9731-ac1598824026",
+		"FS_UUID=aef9c3f8-2fbe-476f-b732-99f31226d601",
+		"LUKS_PASSWORD1=1111",
+		"LUKS_PASSWORD2=2222",
+	}},
 	"swap.raw":          {"swap.sh", nil},
 	"zfs.img":           {"zfs.sh", nil},
 	"zfs_encrypted.img": {"zfs.sh", []string{"ZFS_PASSPHRASE=encrypted"}},
