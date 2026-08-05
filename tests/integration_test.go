@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/anatol/vmtest"
@@ -250,8 +251,21 @@ func TestLoadExtraModules(t *testing.T) {
 	require.NoError(t, err)
 	defer vm.Shutdown()
 
-	require.NoError(t, vm.ConsoleExpect("booster: finit(foo): open /usr/lib/modules/foo.ko: no such file or directory"))
-	require.NoError(t, vm.ConsoleExpect("booster: loading module xfs"))
+	// Modules load concurrently, so the failure for the missing module and the
+	// success for xfs arrive in either order.  ConsoleExpect only moves forward,
+	// so asserting a fixed order fails whenever the boot picks the other one.
+	const (
+		missing = "booster: finit(foo): open /usr/lib/modules/foo.ko: no such file or directory"
+		loaded  = "booster: loading module xfs"
+	)
+	either := regexp.MustCompile(`(` + regexp.QuoteMeta(missing) + `|` + regexp.QuoteMeta(loaded) + `)`)
+	matches, err := vm.ConsoleExpectRE(either)
+	require.NoError(t, err)
+	if strings.Contains(matches[0], "finit(foo)") {
+		require.NoError(t, vm.ConsoleExpect(loaded))
+	} else {
+		require.NoError(t, vm.ConsoleExpect(missing))
+	}
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
 }
 
