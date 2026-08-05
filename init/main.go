@@ -432,9 +432,12 @@ func retryPendingDevices() {
 }
 
 func setupDiskSymlinks(devpath string, blk *blkInfo, err error) error {
-	blk.wwid, err = wwid(devpath)
-	if err != nil {
-		return fmt.Errorf("%s: %v", devpath, err)
+	// hwPath below needs only sysfs, so a device whose INQUIRY fails can still
+	// be addressed by HWPATH=.  Report and carry on rather than returning.
+	var wwidErr error
+	blk.wwid, wwidErr = wwid(devpath)
+	if wwidErr != nil {
+		info("wwid %s: %v", devpath, wwidErr)
 	}
 	for _, wwid := range blk.wwid {
 		if err := diskSymlink("id", devpath, wwid); err != nil {
