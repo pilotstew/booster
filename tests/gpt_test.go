@@ -128,10 +128,14 @@ func TestGptWwid(t *testing.T) {
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
 }
 
+// A HWPATH embeds the SCSI host number, assigned in registration order.  Keep
+// ata_piix out so the virtio HBA is deterministically host0; these VMs have no
+// ATA devices for it to drive.
 func TestGptHwpath(t *testing.T) {
 	vm, err := buildVmInstance(t, Opts{
 		disk:       "assets/gpt.img",
-		kernelArgs: []string{"root=HWPATH=pci-0000:00:04.0-scsi-2:0:0:0-part3"},
+		modules:    "-ata_piix",
+		kernelArgs: []string{"root=HWPATH=pci-0000:00:04.0-scsi-0:0:0:0-part3"},
 	})
 	require.NoError(t, err)
 	defer vm.Shutdown()
