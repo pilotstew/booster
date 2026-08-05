@@ -30,6 +30,15 @@ func pickFreePort(t *testing.T) int {
 	return port
 }
 
+// sshForwardParams returns the qemu params forwarding a free host port to the
+// guest's sshd, along with the address to dial.
+func sshForwardParams(t *testing.T) (params []string, addr string) {
+	t.Helper()
+	port := strconv.Itoa(pickFreePort(t))
+	return []string{"-net", "user,hostfwd=tcp:127.0.0.1:" + port + "-:22", "-net", "nic"},
+		"127.0.0.1:" + port
+}
+
 // generateSSHKeyPair returns PEM-encoded private key bytes plus the
 // OpenSSH authorized_keys line for the matching public key. Both halves of
 // the pair are ed25519.
