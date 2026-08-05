@@ -79,9 +79,13 @@ func wwid(device string) ([]string, error) {
 				return nil, err
 			}
 
+			// systemd's scsi_id treats an absent unit-serial page as an empty
+			// serial rather than an error; match it so the vendor/product WWID
+			// is still emitted.
 			serial, err := dev.SerialNumber()
 			if err != nil {
-				return nil, err
+				debug("wwid %s: serial number unavailable: %v", device, err)
+				serial = ""
 			}
 
 			bus := "scsi"
