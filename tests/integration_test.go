@@ -80,10 +80,13 @@ func TestExt4Wwid(t *testing.T) {
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
 }
 
+// See TestGptHwpath for why ata_piix is excluded: it fixes the SCSI host
+// number the virtio HBA receives, which the HWPATH= below hardcodes.
 func TestExt4Hwpath(t *testing.T) {
 	vm, err := buildVmInstance(t, Opts{
 		disk:       "assets/ext4.img",
-		kernelArgs: []string{"root=HWPATH=pci-0000:00:04.0-scsi-2:0:0:0"},
+		modules:    "-ata_piix",
+		kernelArgs: []string{"root=HWPATH=pci-0000:00:04.0-scsi-0:0:0:0"},
 	})
 	require.NoError(t, err)
 	defer vm.Shutdown()
