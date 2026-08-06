@@ -49,7 +49,7 @@ sudo losetup -d "${keylodev}"; keylodev=
 
 # --- LUKS root disk: keyfile-only (no password slot) ---
 truncate --size 40M "${OUTPUT}"
-rootlodev=$(sudo losetup -f --show "${OUTPUT}")
+rootlodev=$(sudo losetup -f --show "${OUTPUT}" | grep -m1 '^/dev/')
 sudo cryptsetup luksFormat --uuid "${LUKS_UUID}" --type luks2 \
   --key-file "${KEYFILE}" "${rootlodev}"
 sudo cryptsetup open --key-file "${KEYFILE}" "${rootlodev}" "${LUKS_DEV_NAME}"

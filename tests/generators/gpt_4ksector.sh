@@ -10,7 +10,7 @@ quit() {
 }
 
 truncate --size 100M "${OUTPUT}"
-lodev=$(sudo losetup --sector-size 4096 -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup --sector-size 4096 -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 sudo fdisk "${lodev}" <<< "g
 n
 

@@ -9,7 +9,7 @@ quit() {
 }
 
 truncate --size 650M "${OUTPUT}"
-lodev=$(sudo losetup -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 # create 2 partitions equal size
 sudo fdisk "${lodev}" <<< "g
 n

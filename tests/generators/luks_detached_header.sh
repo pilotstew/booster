@@ -28,7 +28,7 @@ quit() {
 truncate --size 40M "${OUTPUT}"
 truncate --size 2M  "${HEADER_OUTPUT}"
 
-lodev=$(sudo losetup -f --show "${OUTPUT}")
+lodev=$(sudo losetup -f --show "${OUTPUT}" | grep -m1 '^/dev/')
 
 # Format with detached header: metadata goes to HEADER_OUTPUT, payload to lodev
 sudo cryptsetup luksFormat \

@@ -40,7 +40,7 @@ for i in $(seq 1 50); do
 done
 
 truncate --size 40M "${OUTPUT}"
-lodev=$(sudo losetup -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 sudo cryptsetup luksFormat --uuid "${LUKS_UUID}" --type luks2 "${lodev}" <<< "${LUKS_PASSWORD}"
 
 printf '%s' "${LUKS_PASSWORD}" > assets/cryptenroll.passphrase

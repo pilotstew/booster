@@ -43,7 +43,7 @@ rm -rf "${cred_dir}"; cred_dir=
 
 # Now attach as a loop device only for the mount step.  By this point the
 # LUKS2 header is fully written; udev will probe and see it quickly.
-lodev=$(sudo losetup -f --show "${OUTPUT}")
+lodev=$(sudo losetup -f --show "${OUTPUT}" | grep -m1 '^/dev/')
 udevadm settle --timeout=10 || true
 
 sudo cryptsetup open --disable-external-tokens --disable-locks --type luks2 "${lodev}" "${LUKS_DEV_NAME}" <<< "${LUKS_PASSWORD}"
