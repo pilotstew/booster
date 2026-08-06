@@ -33,14 +33,16 @@ y
 "
 
 if [ -n "${GPT_ATTR+1}" ]; then
-  sudo gdisk "${lodev}" <<< "x
-a
-2
-${GPT_ATTR}
-
-w
-y
-"
+  # sgdisk rather than gdisk's expert mode: it takes the bit as an argument and
+  # reports failure in its exit status.  The interactive form returns 0 whatever
+  # happens, so an attribute that never got written surfaced much later as a
+  # boot that simply did not print what the test was waiting for, and the test
+  # failed on a qemu timeout two minutes on.
+  sudo sgdisk --attributes=2:set:"${GPT_ATTR}" "${lodev}"
+  if [ "$(sudo sgdisk --attributes=2:get:"${GPT_ATTR}" "${lodev}")" != "2:${GPT_ATTR}:1" ]; then
+    echo "esp.sh: GPT attribute ${GPT_ATTR} did not take on ${lodev}p2" >&2
+    exit 1
+  fi
 fi
 
 sudo mkfs.fat -F32 "${lodev}p1"
