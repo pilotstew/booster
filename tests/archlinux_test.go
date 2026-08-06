@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anatol/vmtest"
@@ -175,9 +176,13 @@ func TestArchLinuxHibernate(t *testing.T) {
 			sess, err = conn.NewSession()
 			require.NoError(t, err)
 			defer sess.Close()
-			out, err = sess.CombinedOutput("uname -a")
+			// What matters after the resume is which kernel came back, not what
+			// the image calls itself: asserting the hostname too made this fail
+			// on any rootfs not built by the arch image these assets came from.
+			out, err = sess.CombinedOutput("uname -sr")
 			require.NoError(t, err, string(out))
-			require.Contains(t, string(out), "Linux archlinux "+ver)
+			require.Equal(t, "Linux "+ver, strings.TrimSpace(string(out)),
+				"resumed VM should be running the kernel it hibernated on")
 		})
 	}
 }
