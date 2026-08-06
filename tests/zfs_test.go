@@ -10,7 +10,7 @@ import (
 func TestZfs(t *testing.T) {
 	vm, err := buildVmInstance(t, Opts{
 		enableZfs:     true,
-		zfsCachePath:  "assets/zfs/zpool.cache",
+		zfsCachePath:  "assets/zfs/zfs.cache",
 		disk:          "assets/zfs.img",
 		kernelVersion: kernelVersions["linux-lts"],
 		kernelArgs:    []string{"zfs=testpool/root"},
@@ -24,7 +24,7 @@ func TestZfs(t *testing.T) {
 func TestUnlockEncryptedZfs(t *testing.T) {
 	vm, err := buildVmInstance(t, Opts{
 		enableZfs:     true,
-		zfsCachePath:  "assets/zfs/zpool.cache",
+		zfsCachePath:  "assets/zfs/zfs_encrypted.cache",
 		disk:          "assets/zfs_encrypted.img",
 		kernelVersion: kernelVersions["linux-lts"],
 		kernelArgs:    []string{"zfs=testpool/root"},
