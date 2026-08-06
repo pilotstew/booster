@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -369,6 +370,34 @@ type Opts struct {
 	sshListen             string
 }
 
+// defaultKernelVersion picks the kernel for a test that does not name one:
+// the "linux" package, else the running kernel, else the first by name.  Map
+// order would vary per run, taking out-of-tree modules (zfs) with it.
+func defaultKernelVersion(t *testing.T) string {
+	t.Helper()
+
+	if kernel, ok := kernelVersions["linux"]; ok {
+		return kernel
+	}
+	require.NotEmpty(t, kernelVersions, "no kernel with a pkgbase found under "+kernelsDir)
+
+	if running, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		want := strings.TrimSpace(string(running))
+		for _, ver := range kernelVersions {
+			if ver == want {
+				return ver
+			}
+		}
+	}
+
+	pkgbases := make([]string, 0, len(kernelVersions))
+	for pkgbase := range kernelVersions {
+		pkgbases = append(pkgbases, pkgbase)
+	}
+	sort.Strings(pkgbases)
+	return kernelVersions[pkgbases[0]]
+}
+
 func buildVmInstance(t *testing.T, opts Opts) (*vmtest.Qemu, error) {
 	require.True(t, opts.disk == "" || len(opts.disks) == 0, "Opts.disk and Opts.disks cannot be specified together")
 	require.False(t, opts.asIso && opts.containsESP)
@@ -385,17 +414,7 @@ func buildVmInstance(t *testing.T, opts Opts) (*vmtest.Qemu, error) {
 	}
 
 	if opts.kernelVersion == "" {
-		if kernel, ok := kernelVersions["linux"]; ok {
-			opts.kernelVersion = kernel
-		} else if len(kernelVersions) > 0 {
-			// Fall back to any available kernel (e.g. linux-cachyos on CachyOS systems).
-			for _, ver := range kernelVersions {
-				opts.kernelVersion = ver
-				break
-			}
-		} else {
-			require.Fail(t, "System does not have 'linux' package installed needed for the integration tests")
-		}
+		opts.kernelVersion = defaultKernelVersion(t)
 	}
 
 	workDir := t.TempDir()
