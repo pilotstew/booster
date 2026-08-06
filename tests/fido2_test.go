@@ -113,8 +113,8 @@ func TestCrypttabFido2NoDevice(t *testing.T) {
 // path — rather than pinning on a non-ctx-aware sync.WaitGroup.Wait() until
 // switch_root.
 //
-// Asserts the info log emitted from the cancel branch of waitForUsbhid in
-// recoverSystemdFido2Password. Without the ctx-aware primitives that log can
+// Asserts the info log emitted from the ctx.Done() branch of the hidraw wait
+// in recoverSystemdFido2Password. Without the ctx-aware primitives that log can
 // never fire and the goroutine leaks.
 func TestCtxAwareFido2CancelOnFallback(t *testing.T) {
 	if !fileExists(binariesDir + "/fido2plugin.so") {
@@ -140,9 +140,9 @@ func TestCtxAwareFido2CancelOnFallback(t *testing.T) {
 	require.NoError(t, vm.ConsoleExpect("Enter passphrase for cryptroot:"))
 	require.NoError(t, vm.ConsoleWrite("567\n"))
 
-	// Unlock cancels parent ctx; the FIDO2 goroutine's waitForUsbhid returns
-	// ctx.Err() and logs from its cancel branch. This is the leak-fix proof.
-	require.NoError(t, vm.ConsoleExpect("FIDO2 unlock for cryptroot cancelled before USB HID ready"))
+	// Unlock cancels the parent ctx while the FIDO2 goroutine is parked waiting
+	// for a hidraw device.  Proof it woke rather than sat on the channel.
+	require.NoError(t, vm.ConsoleExpect("FIDO2 unlock for cryptroot cancelled while waiting for a device"))
 
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
 }
@@ -213,7 +213,7 @@ func TestCtxAwareFido2CancelMultiToken(t *testing.T) {
 	// so 3 successive expects assert that the line appears at least 3 times
 	// in the transcript before "Hello, booster!".
 	for range 3 {
-		require.NoError(t, vm.ConsoleExpect("FIDO2 unlock for cryptroot cancelled before USB HID ready"))
+		require.NoError(t, vm.ConsoleExpect("FIDO2 unlock for cryptroot cancelled while waiting for a device"))
 	}
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
 }

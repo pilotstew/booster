@@ -658,9 +658,13 @@ func TestSSHRemoteUnlockFido2Pending(t *testing.T) {
 	// fido2plugin.so and the init to attempt FIDO2 token unlock against the
 	// device. With no real key plugged in, recoverSystemdFido2Password blocks
 	// waiting for hidraw devices — that's the "pending" state we need.
+	//
+	// token-timeout is far beyond the test's lifetime on purpose: keyboard
+	// fallback then cannot happen, so an unlock over SSH is necessarily
+	// concurrent with the token attempt.
 	crypttabPath := filepath.Join(tmp, "crypttab")
 	require.NoError(t, os.WriteFile(crypttabPath, []byte(
-		"cryptroot UUID=a6cdb03e-ad77-440a-8a93-28ad97de3b00 none fido2-device=auto,x-initrd.attach\n",
+		"cryptroot UUID=a6cdb03e-ad77-440a-8a93-28ad97de3b00 none fido2-device=auto,token-timeout=300,x-initrd.attach\n",
 	), 0o644))
 
 	hostPort := pickFreePort(t)
@@ -679,20 +683,11 @@ func TestSSHRemoteUnlockFido2Pending(t *testing.T) {
 		sshListen:             ":" + strconv.Itoa(guestPort),
 		crypttabFile:          crypttabPath,
 		kernelArgs:            []string{"root=UUID=0cb4665f-65a0-4acc-9710-05163af16f19"},
-		// token-timeout default is 30s; SSH must beat that to exercise the
-		// concurrent-with-token path. Allow generous headroom for DHCP +
-		// FIDO2-attempt warm-up before we dial.
-		vmTimeout: 120 * time.Second,
+		// Headroom for DHCP and the FIDO2 attempt warming up before we dial.
+		vmTimeout: 90 * time.Second,
 	})
 	require.NoError(t, err)
 	defer vm.Shutdown()
-
-	// "Waiting for FIDO2 security key for cryptroot" is emitted from
-	// recoverSystemdFido2Password (init/luks.go) only after the device is
-	// registered in pendingPrompts and the FIDO2 token goroutine is running.
-	// Matching this confirms we're submitting during the token attempt, not
-	// after fallback to keyboard.
-	require.NoError(t, vm.ConsoleExpect("Waiting for FIDO2 security key for cryptroot"))
 
 	clientCfg := &gossh.ClientConfig{
 		User:            "root",
@@ -733,9 +728,12 @@ func TestSSHRemoteUnlockFido2Pending(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, readUntil(br, "Unlocked: cryptroot", 15*time.Second))
 
-	// Boot proceeds to switch_root. If the FIDO2 goroutine's ctx-cancel
-	// hadn't fired we'd hang here until token-timeout — passing "Hello,
-	// booster!" inside the vmTimeout confirms the cancellation path works.
+	// The unlock cancels the in-flight FIDO2 attempt.  Assert the goroutine
+	// said so rather than inferring it from the boot finishing: with
+	// token-timeout at 300s a leaked goroutine would not delay switch_root, so
+	// reaching "Hello, booster!" on its own proves nothing about cancellation.
+	require.NoError(t, vm.ConsoleExpect("FIDO2 unlock for cryptroot cancelled while waiting for a device"))
+
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
 }
 
