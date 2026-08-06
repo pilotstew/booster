@@ -19,7 +19,7 @@ quit() {
 LUKS_DEV_NAME=luks-booster-fido2nodev
 
 truncate --size 40M "${OUTPUT}"
-lodev=$(sudo losetup -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 sudo cryptsetup luksFormat --uuid "${LUKS_UUID}" --type luks2 "${lodev}" <<< "${LUKS_PASSWORD}"
 
 # Inject a fake systemd-fido2 token.  Random credential/salt ensure it will

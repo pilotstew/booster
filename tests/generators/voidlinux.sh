@@ -11,7 +11,7 @@ quit() {
 
 truncate --size 5G "${OUTPUT}"
 mkfs.ext4 "${OUTPUT}"
-lodev=$(sudo losetup -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 mount=$(mktemp -d)
 sudo mount "${lodev}" "${mount}"
 

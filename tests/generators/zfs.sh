@@ -11,7 +11,7 @@ quit() {
 }
 
 truncate --size 100M "${OUTPUT}"
-lodev=$(sudo losetup -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 sudo gdisk "${lodev}" <<< "o
 y
 n

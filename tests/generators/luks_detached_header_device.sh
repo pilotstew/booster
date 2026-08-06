@@ -23,7 +23,7 @@ quit() {
 
 truncate --size 10M "${OUTPUT}"
 mkfs.ext4 -U "${HDRDEV_UUID}" "${OUTPUT}"
-lodev=$(sudo losetup -f --show "${OUTPUT}")
+lodev=$(sudo losetup -f --show "${OUTPUT}" | grep -m1 '^/dev/')
 hdrdir=$(mktemp -d)
 sudo mount "${lodev}" "${hdrdir}"
 sudo chown "${USER}" "${hdrdir}"

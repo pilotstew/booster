@@ -31,7 +31,7 @@ if [ "$CLEVIS_PIN" = "remote" ]; then
 fi
 
 truncate --size 40M "${OUTPUT}"
-lodev=$(sudo losetup -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 sudo cryptsetup luksFormat --uuid "${LUKS_UUID}" --type "${LUKS_TYPE}" ${LUKS_PARAMS} "${lodev}" <<< "${LUKS_PASSWORD}"
 
 if [ "${CLEVIS_PIN}" != "" ]; then

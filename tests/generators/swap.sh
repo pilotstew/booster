@@ -8,7 +8,7 @@ quit() {
 }
 
 truncate --size 10G "${OUTPUT}"
-lodev=$(sudo losetup -f -P --show "${OUTPUT}")
+lodev=$(sudo losetup -f -P --show "${OUTPUT}" | grep -m1 '^/dev/')
 sudo fdisk "${lodev}" <<< "g
 n
 
