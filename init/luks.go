@@ -745,6 +745,9 @@ func recoverSystemdFido2Password(ctx context.Context, t luks.Token, mappingName 
 		case <-ctx.Done():
 			// serialize-mode per-token timeout (or cancel-on-win) fired
 			// while waiting for a FIDO2 device to appear — stop waiting.
+			// Logged because it is the only outward sign the goroutine
+			// honoured cancellation rather than leaking.
+			info("FIDO2 unlock for %s cancelled while waiting for a device: %v", mappingName, ctx.Err())
 			return nil, ctx.Err()
 		case <-noDeviceC:
 			// Dedup across goroutines for the same mapping (multi-FIDO2-token
