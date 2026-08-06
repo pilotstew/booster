@@ -46,9 +46,13 @@ func TestLz4ImageCompression(t *testing.T) {
 func TestLargeLz4ImageCompression(t *testing.T) {
 	vm, err := buildVmInstance(t, Opts{
 		compression: "lz4",
-		modules:     "nvidia,nvidia_modeset,nvidia_drm,nvidia_uvm,amdgpu",
-		disk:        "assets/ext4.img",
-		kernelArgs:  []string{"root=UUID=5c92fc66-7315-408b-b652-176dc554d370"},
+		// The point is bulk: issue 117 only reproduces on an image large enough
+		// to cross lz4's legacy block boundary.  A path pattern gets there with
+		// whatever GPU drivers this kernel ships, and naming modules the host
+		// lacks would be an error.
+		modules:    "kernel/drivers/gpu/",
+		disk:       "assets/ext4.img",
+		kernelArgs: []string{"root=UUID=5c92fc66-7315-408b-b652-176dc554d370"},
 	})
 	require.NoError(t, err)
 	defer vm.Shutdown()
