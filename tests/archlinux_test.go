@@ -3,6 +3,7 @@ package tests
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anatol/vmtest"
 	"github.com/stretchr/testify/require"
@@ -64,6 +65,12 @@ func testArchLinux(t *testing.T, opts Opts, prompt, password string) {
 	sshParams, sshAddr := sshForwardParams(t)
 	opts.params = append(opts.params, sshParams...)
 
+	// A full distro userspace booting to sshd, not just an initramfs: ~9s idle,
+	// well past the 40s default once several VMs run at once.
+	if opts.vmTimeout == 0 {
+		opts.vmTimeout = 120 * time.Second
+	}
+
 	vm, err := buildVmInstance(t, opts)
 	require.NoError(t, err)
 	defer vm.Shutdown()
@@ -78,8 +85,7 @@ func testArchLinux(t *testing.T, opts Opts, prompt, password string) {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	conn, err := ssh.Dial("tcp", sshAddr, config)
-	require.NoError(t, err)
+	conn := dialSSHWithRetry(t, sshAddr, config, 60*time.Second)
 	defer conn.Close()
 
 	sess, err := conn.NewSession()
@@ -133,6 +139,8 @@ func TestArchLinuxHibernate(t *testing.T) {
 					{Path: "assets/archlinux.ext4.raw", Format: "raw", Controller: controller},
 					{Path: "assets/swap.raw", Format: "raw"},
 				},
+				// Full distro userspace, and it boots twice; see testArchLinux.
+				vmTimeout:  120 * time.Second,
 				kernelArgs: []string{"root=" + ext4RootDevice, "resume=UUID=5ec330f5-ac5e-48d2-98b6-87fd3e9b272f", "rw"},
 			}
 
@@ -145,8 +153,7 @@ func TestArchLinuxHibernate(t *testing.T) {
 				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 			}
 
-			conn, err := ssh.Dial("tcp", sshAddr, config)
-			require.NoError(t, err)
+			conn := dialSSHWithRetry(t, sshAddr, config, 60*time.Second)
 			defer conn.Close()
 
 			sess, err := conn.NewSession()
@@ -171,8 +178,7 @@ func TestArchLinuxHibernate(t *testing.T) {
 
 			require.NoError(t, vm2.ConsoleExpect("PM: Image loading done"))
 
-			conn, err = ssh.Dial("tcp", sshAddr, config)
-			require.NoError(t, err)
+			conn = dialSSHWithRetry(t, sshAddr, config, 60*time.Second)
 			defer conn.Close()
 
 			sess, err = conn.NewSession()

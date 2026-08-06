@@ -39,6 +39,25 @@ func sshForwardParams(t *testing.T) (params []string, addr string) {
 		"127.0.0.1:" + port
 }
 
+// dialSSHWithRetry keeps dialling until the guest's sshd answers.  QEMU accepts
+// a forwarded connection before the guest is listening and then resets it, so a
+// single dial races the boot.
+func dialSSHWithRetry(t *testing.T, addr string, config *gossh.ClientConfig, timeout time.Duration) *gossh.Client {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := gossh.Dial("tcp", addr, config)
+		if err == nil {
+			return conn
+		}
+		if time.Now().After(deadline) {
+			require.NoError(t, err, "ssh.Dial never succeeded within %v", timeout)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 // generateSSHKeyPair returns PEM-encoded private key bytes plus the
 // OpenSSH authorized_keys line for the matching public key. Both halves of
 // the pair are ed25519.
