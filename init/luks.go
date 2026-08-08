@@ -1119,6 +1119,18 @@ func recoverSystemdTPM2Password(ctx context.Context, t luks.Token, mappingName s
 		}
 	}
 
+	// the digest is fixed by the PCRs alone, so no PIN can satisfy a mismatch;
+	// a signed policy authorizes against a key instead and cannot be pre-checked
+	if !signed {
+		if err := tpm2PolicySatisfiable(node.PCRs, bank, policyHash, node.Pin); err != nil {
+			if errors.Is(err, errTPM2TokenMismatch) {
+				return nil, err
+			}
+			// no TPM or a transient failure: let the unseal below report it
+			debug("%s: TPM2 policy pre-check inconclusive: %v", mappingName, err)
+		}
+	}
+
 	maxAttempts := 1
 	if node.Pin {
 		maxAttempts = 3
@@ -1148,6 +1160,11 @@ func recoverSystemdTPM2Password(ctx context.Context, t luks.Token, mappingName s
 			encoded := []byte(base64.StdEncoding.EncodeToString(password))
 			wipe(password)
 			return encoded, nil
+		}
+		if errors.Is(err, errTPM2TokenMismatch) {
+			// the PCRs cannot change between attempts, so each retry would fail
+			// identically while telling the user their PIN is wrong
+			return nil, err
 		}
 		if node.Pin && attempt < maxAttempts-1 {
 			promptPrefix = "TPM2 PIN incorrect — "

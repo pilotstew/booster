@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -111,6 +112,32 @@ func tpm2PINAuthValue(pin, salt []byte) []byte {
 		auth = auth[:len(auth)-1]
 	}
 	return auth
+}
+
+// errTPM2TokenMismatch reports a token that cannot match this machine: wrong PCRs,
+// a signature that does not authorize them, or a blob sealed to another TPM. Never
+// an authentication failure, so the caller moves to the next token rather than
+// blaming the PIN. Mirrors systemd's ERRNO_IS_NEG_TPM2_TOKEN_MISMATCH.
+var errTPM2TokenMismatch = errors.New("TPM2 token does not match current system state: either the system has been tampered with, or the policy is out of date")
+
+// tpm2PolicySatisfiable reports whether the live PCRs still satisfy the digest
+// stored in the token. Needs no PIN and does not unseal, so it can run before
+// prompting.
+func tpm2PolicySatisfiable(pcrs []int, bank tpm2.Algorithm, expectedDigest []byte, usePassword bool) error {
+	tpmAwaitReady()
+
+	dev, err := openTPM()
+	if err != nil {
+		return err
+	}
+	defer dev.Close()
+
+	sessHandle, _, err := policyPCRSession(dev, pcrs, bank, expectedDigest, usePassword)
+	if err != nil {
+		return err
+	}
+	tpm2.FlushContext(dev, sessHandle)
+	return nil
 }
 
 func tpm2Unseal(public, private []byte, pcrs []int, bank tpm2.Algorithm, policyHash, password []byte, srkHandle tpmutil.Handle) ([]byte, error) {
@@ -417,7 +444,7 @@ func policyPCRSession(dev io.ReadWriteCloser, pcrs []int, algo tpm2.Algorithm, e
 	}
 
 	if !bytes.Equal(policy, expectedDigest) {
-		return tpm2.HandleNull, nil, fmt.Errorf("current policy digest does not match stored policy digest, cancelling TPM2 authentication attempt")
+		return tpm2.HandleNull, nil, fmt.Errorf("%w (PCR values changed since enrollment, PCRs %v)", errTPM2TokenMismatch, pcrs)
 	}
 
 	return sessHandle, policy, nil
