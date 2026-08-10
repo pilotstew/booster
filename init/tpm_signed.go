@@ -224,20 +224,6 @@ func signedTPM2Unseal(t transport.TPM, srk tpm2.NamedHandle, public tpm2.TPM2BPu
 	return nil, lastErr
 }
 
-// classifyTPMFailure maps a TPM response code onto errTPM2TokenMismatch, mirroring
-// systemd's ERRNO_IS_NEG_TPM2_TOKEN_MISMATCH. TPMRCAuthFail (a wrong PIN, re-prompt)
-// and TPMRCPCRChanged (a PCR moving mid-session, systemd retries it) stay
-// unclassified on purpose.
-func classifyTPMFailure(stage string, err error) error {
-	switch {
-	case errors.Is(err, tpm2.TPMRCPolicyFail):
-		return fmt.Errorf("%w (%s rejected the current PCR state: %w)", errTPM2TokenMismatch, stage, err)
-	case errors.Is(err, tpm2.TPMRCIntegrity):
-		return fmt.Errorf("%w (%s: sealed to a different TPM: %w)", errTPM2TokenMismatch, stage, err)
-	}
-	return fmt.Errorf("%s: %w", stage, err)
-}
-
 func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string][]pcrSignature, bankName string, verifyKey *rsa.PublicKey, exp uint32, pubkeyPCRs, literalPCRs []int, pin []byte) ([]byte, error) {
 	// With a PIN, the session carries the object's auth value so the trailing
 	// PolicyAuthValue (composed after PolicyAuthorize, matching systemd) is satisfied.
@@ -348,26 +334,6 @@ func pcrBankAlgID(s string) tpm2.TPMAlgID {
 	return tpm2.TPMAlgSHA256
 }
 
-// loadSignedSRK resolves the storage parent the sealed blob lives under. A
-// non-zero srkHandle is the persistent SRK (systemd v252+ tokens) — read its
-// Name. A zero handle means derive the standard transient primary; the returned
-// cleanup flushes it.
-func loadSignedSRK(t transport.TPM, srkHandle uint32) (tpm2.NamedHandle, func(), error) {
-	noop := func() {}
-	if srkHandle != 0 {
-		rp, err := (&tpm2.ReadPublic{ObjectHandle: tpm2.TPMHandle(srkHandle)}).Execute(t)
-		if err != nil {
-			return tpm2.NamedHandle{}, noop, fmt.Errorf("reading SRK %#x: %v", srkHandle, err)
-		}
-		return tpm2.NamedHandle{Handle: tpm2.TPMHandle(srkHandle), Name: rp.Name}, noop, nil
-	}
-	cp, err := (&tpm2.CreatePrimary{PrimaryHandle: tpm2.TPMRHOwner, InPublic: tpm2.New2B(tpm2.ECCSRKTemplate)}).Execute(t)
-	if err != nil {
-		return tpm2.NamedHandle{}, noop, fmt.Errorf("creating SRK: %v", err)
-	}
-	return tpm2.NamedHandle{Handle: cp.ObjectHandle, Name: cp.Name}, func() { flushHandle(t, cp.ObjectHandle) }, nil
-}
-
 // recoverSignedTPM2Password unseals a signed-policy systemd-tpm2 token. The
 // caller supplies the parsed blob sections, SRK handle, bank, signing key, and
 // the PIN auth value (nil when the token has no PIN); this builds the new-API
@@ -394,7 +360,7 @@ func recoverSignedTPM2Password(public, private []byte, pcrBankName string, pubke
 	defer dev.Close()
 	thetpm := transport.FromReadWriteCloser(dev)
 
-	srk, flush, err := loadSignedSRK(thetpm, srkHandle)
+	srk, flush, err := loadUnsealSRK(thetpm, srkHandle)
 	if err != nil {
 		return nil, err
 	}

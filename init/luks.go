@@ -960,9 +960,9 @@ func tokenBindsPCR15(t luks.Token) bool {
 type latchMode int
 
 const (
-	latchNone     latchMode = iota // do not extend PCR15
-	latchRequired                  // extend, fail-closed (the key is bound to PCR15)
-	latchDefensive                 // extend, best-effort (no PCR15 token, but a TPM is present)
+	latchNone      latchMode = iota // do not extend PCR15
+	latchRequired                   // extend, fail-closed (the key is bound to PCR15)
+	latchDefensive                  // extend, best-effort (no PCR15 token, but a TPM is present)
 )
 
 // volumeKeyLatchMode maps the unlock context to a latch mode. tpm2-measure-pcr=
@@ -1064,8 +1064,6 @@ func recoverSystemdTPM2Password(ctx context.Context, t luks.Token, mappingName s
 		return nil, err
 	}
 
-	bank := parsePCRBank(node.PCRBank)
-
 	var srkHandle tpmutil.Handle
 	if node.Srk != "" {
 		srkBytes, err := base64.StdEncoding.DecodeString(node.Srk)
@@ -1122,7 +1120,7 @@ func recoverSystemdTPM2Password(ctx context.Context, t luks.Token, mappingName s
 	// the digest is fixed by the PCRs alone, so no PIN can satisfy a mismatch;
 	// a signed policy authorizes against a key instead and cannot be pre-checked
 	if !signed {
-		if err := tpm2PolicySatisfiable(node.PCRs, bank, policyHash, node.Pin); err != nil {
+		if err := tpm2PolicySatisfiable(node.PCRs, node.PCRBank, policyHash, node.Pin); err != nil {
 			if errors.Is(err, errTPM2TokenMismatch) {
 				return nil, err
 			}
@@ -1150,7 +1148,7 @@ func recoverSystemdTPM2Password(ctx context.Context, t luks.Token, mappingName s
 		if signed {
 			password, err = recoverSignedTPM2Password(public, private, node.PCRBank, pubkeyPCRs, node.PCRs, verifyKey, uint32(srkHandle), tpm2Signature, authValue)
 		} else {
-			password, err = tpm2Unseal(public, private, node.PCRs, bank, policyHash, authValue, srkHandle)
+			password, err = tpm2Unseal(public, private, node.PCRs, node.PCRBank, policyHash, authValue, uint32(srkHandle))
 		}
 		// The TPM call has consumed authValue; scrub it on every path (a
 		// wrong-PIN retry redeclares a fresh one next iteration). nil is a no-op.

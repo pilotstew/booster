@@ -14,26 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/go-tpm/legacy/tpm2"
+	legacytpm2 "github.com/google/go-tpm/legacy/tpm2"
+	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpmutil"
 	"golang.org/x/crypto/pbkdf2"
 )
-
-var defaultSymScheme = &tpm2.SymScheme{
-	Alg:     tpm2.AlgAES,
-	KeyBits: 128,
-	Mode:    tpm2.AlgCFB,
-}
-
-var defaultRSAParams = &tpm2.RSAParams{
-	Symmetric: defaultSymScheme,
-	KeyBits:   2048,
-}
-
-var defaultECCParams = &tpm2.ECCParams{
-	Symmetric: defaultSymScheme,
-	CurveID:   tpm2.CurveNISTP256,
-}
 
 var enableSwEmulator bool
 
@@ -44,13 +30,13 @@ func openTPM() (io.ReadWriteCloser, error) {
 	if enableSwEmulator {
 		dev, err = net.Dial("tcp", ":2321") // swtpm emulator is listening at port 2321
 	} else {
-		dev, err = tpm2.OpenTPM("/dev/tpmrm0")
+		dev, err = legacytpm2.OpenTPM("/dev/tpmrm0")
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := tpm2.GetManufacturer(dev); err != nil {
+	if _, err := legacytpm2.GetManufacturer(dev); err != nil {
 		return nil, fmt.Errorf("device is not a TPM 2.0")
 	}
 
@@ -114,16 +100,136 @@ func tpm2PINAuthValue(pin, salt []byte) []byte {
 	return auth
 }
 
+// classifyTPMFailure maps a TPM response code onto errTPM2TokenMismatch, mirroring
+// systemd's ERRNO_IS_NEG_TPM2_TOKEN_MISMATCH. TPMRCAuthFail (a wrong PIN, re-prompt)
+// stays unclassified on purpose, as does TPMRCPCRChanged, which systemd retries and
+// booster does not.
+func classifyTPMFailure(stage string, err error) error {
+	switch {
+	case errors.Is(err, tpm2.TPMRCPolicyFail):
+		return fmt.Errorf("%w (%s rejected the current PCR state: %w)", errTPM2TokenMismatch, stage, err)
+	case errors.Is(err, tpm2.TPMRCIntegrity):
+		return fmt.Errorf("%w (%s: sealed to a different TPM: %w)", errTPM2TokenMismatch, stage, err)
+	}
+	return fmt.Errorf("%s: %w", stage, err)
+}
+
 // errTPM2TokenMismatch reports a token that cannot match this machine: wrong PCRs,
 // a signature that does not authorize them, or a blob sealed to another TPM. Never
 // an authentication failure, so the caller moves to the next token rather than
 // blaming the PIN. Mirrors systemd's ERRNO_IS_NEG_TPM2_TOKEN_MISMATCH.
 var errTPM2TokenMismatch = errors.New("TPM2 token does not match current system state: either the system has been tampered with, or the policy is out of date")
 
+// unsealSRKTemplate is the transient storage primary derived for tokens with no
+// tpm2_srk field (systemd pre-v252). The TPM regenerates it from its seed, so any
+// change stops those tokens loading: NoDA must stay unset and Unique must hold
+// zero-length buffers, which is why legacytpm2.ECCSRKTemplate is not used here.
+// TestUnsealSRKTemplateMatchesLegacy pins the equivalence.
+var unsealSRKTemplate = tpm2.TPMTPublic{
+	Type:    tpm2.TPMAlgECC,
+	NameAlg: tpm2.TPMAlgSHA256,
+	ObjectAttributes: tpm2.TPMAObject{
+		FixedTPM:            true,
+		FixedParent:         true,
+		SensitiveDataOrigin: true,
+		UserWithAuth:        true,
+		Restricted:          true,
+		Decrypt:             true,
+	},
+	Parameters: tpm2.NewTPMUPublicParms(tpm2.TPMAlgECC, &tpm2.TPMSECCParms{
+		Symmetric: tpm2.TPMTSymDefObject{
+			Algorithm: tpm2.TPMAlgAES,
+			KeyBits:   tpm2.NewTPMUSymKeyBits(tpm2.TPMAlgAES, tpm2.TPMKeyBits(128)),
+			Mode:      tpm2.NewTPMUSymMode(tpm2.TPMAlgAES, tpm2.TPMAlgCFB),
+		},
+		CurveID: tpm2.TPMECCNistP256,
+	}),
+	Unique: tpm2.NewTPMUPublicID(tpm2.TPMAlgECC, &tpm2.TPMSECCPoint{
+		X: tpm2.TPM2BECCParameter{},
+		Y: tpm2.TPM2BECCParameter{},
+	}),
+}
+
+// loadUnsealSRK resolves the storage parent of a sealed blob: the persistent SRK
+// named by the token (systemd v252+), or the transient primary above. The returned
+// cleanup flushes the transient one.
+func loadUnsealSRK(t transport.TPM, srkHandle uint32) (tpm2.NamedHandle, func(), error) {
+	noop := func() {}
+	if srkHandle != 0 {
+		// Persistent handle: never flushed, that would evict it from the TPM.
+		rp, err := (&tpm2.ReadPublic{ObjectHandle: tpm2.TPMHandle(srkHandle)}).Execute(t)
+		if err != nil {
+			return tpm2.NamedHandle{}, noop, fmt.Errorf("reading SRK %#x: %w", srkHandle, err)
+		}
+		return tpm2.NamedHandle{Handle: tpm2.TPMHandle(srkHandle), Name: rp.Name}, noop, nil
+	}
+	cp, err := (&tpm2.CreatePrimary{
+		PrimaryHandle: tpm2.TPMRHOwner,
+		InPublic:      tpm2.New2B(unsealSRKTemplate),
+	}).Execute(t)
+	if err != nil {
+		return tpm2.NamedHandle{}, noop, fmt.Errorf("creating SRK: %w", err)
+	}
+	return tpm2.NamedHandle{Handle: cp.ObjectHandle, Name: cp.Name},
+		func() { _, _ = (&tpm2.FlushContext{FlushHandle: cp.ObjectHandle}).Execute(t) }, nil
+}
+
+// literalPolicySession rebuilds the policy a literal-PCR token was sealed against
+// and checks the digest. systemd seals PolicyPCR then PolicyAuthValue, and the
+// digest only matches when that order is reproduced exactly. It never depends on
+// the PIN's value, since PolicyAuthValue contributes a fixed constant, which is
+// what lets callers test satisfiability before prompting.
+func literalPolicySession(t transport.TPM, pcrs []int, bank tpm2.TPMAlgID, expectedDigest []byte, pin []byte, usePIN bool) (tpm2.Session, func() error, error) {
+	// unbound, unsalted, unencrypted: go-tpm leaves symmetric, bind and salt null,
+	// so this assumes a trusted bus. The auth value is HMAC'd rather than sent, but
+	// the unsealed key crosses a discrete TPM's bus in the clear.
+	var opts []tpm2.AuthOption
+	if len(pin) > 0 {
+		opts = append(opts, tpm2.Auth(pin))
+	}
+	sess, cleanup, err := tpm2.PolicySession(t, tpm2.TPMAlgSHA256, 16, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("starting policy session: %w", err)
+	}
+
+	if len(pcrs) > 0 {
+		pcrsU := make([]uint, len(pcrs))
+		for i, p := range pcrs {
+			pcrsU[i] = uint(p)
+		}
+		sel := tpm2.TPMLPCRSelection{PCRSelections: []tpm2.TPMSPCRSelection{{
+			Hash:      bank,
+			PCRSelect: tpm2.PCClientCompatible.PCRs(pcrsU...),
+		}}}
+		if _, err := (&tpm2.PolicyPCR{PolicySession: sess.Handle(), Pcrs: sel}).Execute(t); err != nil {
+			cleanup()
+			return nil, nil, classifyTPMFailure("PolicyPCR", err)
+		}
+	}
+
+	if usePIN {
+		if _, err := (&tpm2.PolicyAuthValue{PolicySession: sess.Handle()}).Execute(t); err != nil {
+			cleanup()
+			return nil, nil, classifyTPMFailure("PolicyAuthValue", err)
+		}
+	}
+
+	pgd, err := (&tpm2.PolicyGetDigest{PolicySession: sess.Handle()}).Execute(t)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("reading policy digest: %w", err)
+	}
+	if !bytes.Equal(pgd.PolicyDigest.Buffer, expectedDigest) {
+		cleanup()
+		return nil, nil, fmt.Errorf("%w (PCR values changed since enrollment, PCRs %v)", errTPM2TokenMismatch, pcrs)
+	}
+	return sess, cleanup, nil
+}
+
 // tpm2PolicySatisfiable reports whether the live PCRs still satisfy the digest
 // stored in the token. Needs no PIN and does not unseal, so it can run before
 // prompting.
-func tpm2PolicySatisfiable(pcrs []int, bank tpm2.Algorithm, expectedDigest []byte, usePassword bool) error {
+func tpm2PolicySatisfiable(pcrs []int, bankName string, expectedDigest []byte, usePIN bool) error {
 	tpmAwaitReady()
 
 	dev, err := openTPM()
@@ -132,15 +238,15 @@ func tpm2PolicySatisfiable(pcrs []int, bank tpm2.Algorithm, expectedDigest []byt
 	}
 	defer dev.Close()
 
-	sessHandle, _, err := policyPCRSession(dev, pcrs, bank, expectedDigest, usePassword)
+	_, cleanup, err := literalPolicySession(transport.FromReadWriteCloser(dev), pcrs, pcrBankAlgID(bankName), expectedDigest, nil, usePIN)
 	if err != nil {
 		return err
 	}
-	tpm2.FlushContext(dev, sessHandle)
+	cleanup()
 	return nil
 }
 
-func tpm2Unseal(public, private []byte, pcrs []int, bank tpm2.Algorithm, policyHash, password []byte, srkHandle tpmutil.Handle) ([]byte, error) {
+func tpm2Unseal(public, private []byte, pcrs []int, bankName string, policyHash, pin []byte, srkHandle uint32) ([]byte, error) {
 	tpmAwaitReady()
 
 	dev, err := openTPM()
@@ -148,58 +254,43 @@ func tpm2Unseal(public, private []byte, pcrs []int, bank tpm2.Algorithm, policyH
 		return nil, err
 	}
 	defer dev.Close()
+	t := transport.FromReadWriteCloser(dev)
 
-	sessHandle, _, err := policyPCRSession(dev, pcrs, bank, policyHash, password != nil)
+	srk, flush, err := loadUnsealSRK(t, srkHandle)
 	if err != nil {
 		return nil, err
 	}
-	defer tpm2.FlushContext(dev, sessHandle)
+	defer flush()
 
-	var parent tpmutil.Handle
-	if srkHandle != 0 {
-		// Use the persistent SRK provisioned by systemd-tpm2-setup (systemd v252+ tokens).
-		// Do not FlushContext on a persistent handle — that would evict it from the TPM.
-		parent = srkHandle
-	} else {
-		// Legacy path: derive a transient primary from the well-known ECC template.
-		// Used for tokens created by systemd pre-v252 that have no tpm2_srk field.
-		srkTemplate := tpm2.Public{
-			Type:          tpm2.AlgECC,
-			NameAlg:       tpm2.AlgSHA256,
-			Attributes:    tpm2.FlagStorageDefault,
-			AuthPolicy:    nil,
-			ECCParameters: defaultECCParams,
-			RSAParameters: defaultRSAParams,
-		}
-		parent, _, err = tpm2.CreatePrimary(dev, tpm2.HandleOwner, tpm2.PCRSelection{}, "", "", srkTemplate)
-		if err != nil {
-			return nil, fmt.Errorf("clevis.go/tpm2: can't create primary key: %v", err)
-		}
-		defer tpm2.FlushContext(dev, parent)
-	}
-
-	objectHandle, _, err := tpm2.Load(dev, parent, "", public, private)
+	pubArea, err := tpm2.Unmarshal[tpm2.TPMTPublic](public)
 	if err != nil {
-		return nil, fmt.Errorf("clevis.go/tpm2: unable to load data: %v", err)
+		return nil, fmt.Errorf("parsing sealed object public area: %w", err)
 	}
-	defer tpm2.FlushContext(dev, objectHandle)
-
-	unsealed, err := tpm2.UnsealWithSession(dev, sessHandle, objectHandle, string(password))
+	loadRsp, err := (&tpm2.Load{
+		ParentHandle: srk,
+		InPrivate:    tpm2.TPM2BPrivate{Buffer: private},
+		InPublic:     tpm2.New2B(*pubArea),
+	}).Execute(t)
 	if err != nil {
-		return nil, fmt.Errorf("unable to unseal data: %v", err)
+		return nil, classifyTPMFailure("loading sealed object", err)
 	}
+	defer func() { _, _ = (&tpm2.FlushContext{FlushHandle: loadRsp.ObjectHandle}).Execute(t) }()
 
-	return unsealed, nil
-}
-
-func parsePCRBank(bank string) tpm2.Algorithm {
-	switch bank {
-	case "sha1":
-		return tpm2.AlgSHA1
-	case "sha256":
-		return tpm2.AlgSHA256
+	sess, cleanup, err := literalPolicySession(t, pcrs, pcrBankAlgID(bankName), policyHash, pin, len(pin) > 0)
+	if err != nil {
+		return nil, err
 	}
-	return tpm2.AlgSHA256
+	defer cleanup()
+
+	unseal, err := (&tpm2.Unseal{ItemHandle: tpm2.AuthHandle{
+		Handle: loadRsp.ObjectHandle,
+		Name:   loadRsp.Name,
+		Auth:   sess,
+	}}).Execute(t)
+	if err != nil {
+		return nil, classifyTPMFailure("unseal", err)
+	}
+	return unseal.OutData.Buffer, nil
 }
 
 // pcrSystemIdentity is the PCR systemd reserves as "system-identity": it is
@@ -243,29 +334,29 @@ func xescapeColon(s string) string {
 // cryptoHashForPCRBank maps a TPM PCR bank algorithm to its crypto.Hash.
 // ok is false for algorithms booster cannot handle, letting the caller fail
 // closed rather than silently leave that bank's PCR un-extended.
-func cryptoHashForPCRBank(alg tpm2.Algorithm) (h crypto.Hash, ok bool) {
+func cryptoHashForPCRBank(alg legacytpm2.Algorithm) (h crypto.Hash, ok bool) {
 	switch alg {
-	case tpm2.AlgSHA1:
+	case legacytpm2.AlgSHA1:
 		return crypto.SHA1, true
-	case tpm2.AlgSHA256:
+	case legacytpm2.AlgSHA256:
 		return crypto.SHA256, true
-	case tpm2.AlgSHA384:
+	case legacytpm2.AlgSHA384:
 		return crypto.SHA384, true
-	case tpm2.AlgSHA512:
+	case legacytpm2.AlgSHA512:
 		return crypto.SHA512, true
 	}
 	return 0, false
 }
 
 // activePCRBanks returns the hash algorithms of the TPM's allocated PCR banks.
-func activePCRBanks(dev io.ReadWriter) ([]tpm2.Algorithm, error) {
-	caps, _, err := tpm2.GetCapability(dev, tpm2.CapabilityPCRs, 64, 0)
+func activePCRBanks(dev io.ReadWriter) ([]legacytpm2.Algorithm, error) {
+	caps, _, err := legacytpm2.GetCapability(dev, legacytpm2.CapabilityPCRs, 64, 0)
 	if err != nil {
 		return nil, err
 	}
-	var banks []tpm2.Algorithm
+	var banks []legacytpm2.Algorithm
 	for _, c := range caps {
-		sel, ok := c.(tpm2.PCRSelection)
+		sel, ok := c.(legacytpm2.PCRSelection)
 		if !ok || len(sel.PCRs) == 0 {
 			continue
 		}
@@ -318,7 +409,7 @@ func measureVolumeKeyToPCR15(k volumeKeyHMACer, volumeName, luksUUID string) err
 		if err != nil {
 			return fmt.Errorf("computing PCR%d measurement for bank %v: %v", pcrSystemIdentity, bank, err)
 		}
-		if err := tpm2.PCRExtend(dev, tpmutil.Handle(pcrSystemIdentity), bank, digest, ""); err != nil {
+		if err := legacytpm2.PCRExtend(dev, tpmutil.Handle(pcrSystemIdentity), bank, digest, ""); err != nil {
 			return fmt.Errorf("extending PCR%d in bank %v: %v", pcrSystemIdentity, bank, err)
 		}
 	}
@@ -354,7 +445,7 @@ func measurePhaseToPCR11(word string) error {
 		}
 		hh := h.New()
 		hh.Write([]byte(word))
-		if err := tpm2.PCRExtend(dev, tpmutil.Handle(pcrKernelBoot), bank, hh.Sum(nil), ""); err != nil {
+		if err := legacytpm2.PCRExtend(dev, tpmutil.Handle(pcrKernelBoot), bank, hh.Sum(nil), ""); err != nil {
 			return fmt.Errorf("extending PCR%d in bank %v: %v", pcrKernelBoot, bank, err)
 		}
 	}
@@ -399,53 +490,4 @@ func applyBootPhaseForwardLock() {
 	if err := measurePhaseToPCR11(phaseLeaveInitrd); err != nil {
 		warning("PCR%d: could not extend leave-initrd forward-lock: %v", pcrKernelBoot, err)
 	}
-}
-
-// Returns session handle and policy digest.
-func policyPCRSession(dev io.ReadWriteCloser, pcrs []int, algo tpm2.Algorithm, expectedDigest []byte, usePassword bool) (handle tpmutil.Handle, policy []byte, retErr error) {
-	// This session assumes the bus is trusted, so we:
-	// - use nil for tpmkey, encrypted salt, and symmetric
-	// - use and all-zeros caller nonce, and ignore the returned nonce
-	// As we are creating a plain TPM session, we:
-	// - setup a policy session
-	// - don't bind the session to any particular key
-	sessHandle, _, err := tpm2.StartAuthSession(
-		dev,
-		/*tpmkey=*/ tpm2.HandleNull,
-		/*bindkey=*/ tpm2.HandleNull,
-		/*nonceCaller=*/ make([]byte, 32),
-		/*encryptedSalt=*/ nil,
-		/*sessionType=*/ tpm2.SessionPolicy,
-		/*symmetric=*/ tpm2.AlgNull,
-		/*authHash=*/ tpm2.AlgSHA256)
-	if err != nil {
-		return tpm2.HandleNull, nil, fmt.Errorf("unable to start session: %v", err)
-	}
-
-	if len(pcrs) > 0 {
-		pcrSelection := tpm2.PCRSelection{
-			Hash: algo,
-			PCRs: pcrs,
-		}
-		if err := tpm2.PolicyPCR(dev, sessHandle, nil, pcrSelection); err != nil {
-			return tpm2.HandleNull, nil, fmt.Errorf("unable to bind PCRs to auth policy: %v", err)
-		}
-	}
-
-	if usePassword {
-		if err := tpm2.PolicyPassword(dev, sessHandle); err != nil {
-			return tpm2.HandleNull, nil, err
-		}
-	}
-
-	policy, err = tpm2.PolicyGetDigest(dev, sessHandle)
-	if err != nil {
-		return tpm2.HandleNull, nil, fmt.Errorf("unable to get policy digest: %v", err)
-	}
-
-	if !bytes.Equal(policy, expectedDigest) {
-		return tpm2.HandleNull, nil, fmt.Errorf("%w (PCR values changed since enrollment, PCRs %v)", errTPM2TokenMismatch, pcrs)
-	}
-
-	return sessHandle, policy, nil
 }
