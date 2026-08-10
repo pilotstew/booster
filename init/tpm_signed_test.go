@@ -381,6 +381,65 @@ func TestSignedUnsealWithPIN(t *testing.T) {
 	require.Error(t, err, "a wrong PIN must not unseal")
 }
 
+// TestSignedUnsealWrongPINStaysRetryable pins how a wrong PIN fails, which the
+// test above does not: it only asserts that the unseal fails at all. That gap
+// let a regression through: signedTPM2Unseal tries two RSA exponent encodings,
+// and the wrong one builds a policy the object can never satisfy, so it always
+// fails with TPM_RC_POLICY_FAIL. Reporting that in place of the first attempt's
+// TPM_RC_AUTH_FAIL classifies a mistyped PIN as a token mismatch, which tells
+// the user their machine has been tampered with and stops the caller
+// re-prompting.
+func TestSignedUnsealWrongPINStaysRetryable(t *testing.T) {
+	r := newSignedRig(t)
+	pin := []byte("1234")
+	authPolicy := r.authorizePolicy(func(pc *tpm2.PolicyCalculator) {
+		require.NoError(t, (&tpm2.PolicyAuthValue{}).Update(pc))
+	})
+	pub, priv := r.seal(authPolicy, pin)
+
+	const debugPCR = 16
+	pubkeyPCRs := []int{debugPCR}
+	approved := r.policyPCRDigest(debugPCR)
+	sig := r.sigJSON(debugPCR, approved, r.signPolicy(approved))
+
+	_, err := signedTPM2Unseal(r.tpm, r.srk, pub, priv, r.pub(), pubkeyPCRs, nil, "sha256", sig, []byte("9999"))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, errTPM2TokenMismatch,
+		"a wrong PIN is an authentication failure; classifying it as a token mismatch stops the retry")
+	require.ErrorIs(t, err, tpm2.TPMRCAuthFail)
+}
+
+// TestSignedUnsealStaleSignatureIsMismatch is the other half of the
+// classification: when the signature no longer covers the live PCRs, no PIN can
+// help, so it must classify as a token mismatch and not provoke a re-prompt.
+func TestSignedUnsealStaleSignatureIsMismatch(t *testing.T) {
+	r := newSignedRig(t)
+	pin := []byte("1234")
+	authPolicy := r.authorizePolicy(func(pc *tpm2.PolicyCalculator) {
+		require.NoError(t, (&tpm2.PolicyAuthValue{}).Update(pc))
+	})
+	pub, priv := r.seal(authPolicy, pin)
+
+	const debugPCR = 16
+	pubkeyPCRs := []int{debugPCR}
+	approved := r.policyPCRDigest(debugPCR)
+	sig := r.sigJSON(debugPCR, approved, r.signPolicy(approved))
+
+	// Move the bound PCR: the signature now authorizes a policy that is no
+	// longer the live one, as a kernel or firmware update would leave it.
+	_, err := (&tpm2.PCRExtend{
+		PCRHandle: tpm2.AuthHandle{Handle: tpm2.TPMHandle(debugPCR), Auth: tpm2.PasswordAuth(nil)},
+		Digests: tpm2.TPMLDigestValues{Digests: []tpm2.TPMTHA{{
+			HashAlg: tpm2.TPMAlgSHA256, Digest: bytes.Repeat([]byte{0xcd}, 32),
+		}}},
+	}).Execute(r.tpm)
+	require.NoError(t, err)
+
+	_, err = signedTPM2Unseal(r.tpm, r.srk, pub, priv, r.pub(), pubkeyPCRs, nil, "sha256", sig, pin)
+	require.ErrorIs(t, err, errTPM2TokenMismatch,
+		"a signature that no longer authorizes the live PCRs is a token mismatch, not a bad PIN")
+}
+
 // sigJSONEntries builds a systemd PCR signature JSON with multiple (approved
 // policy digest, signature) entries for one bank/pcr — modeling a signature file
 // that covers more than one boot phase.
