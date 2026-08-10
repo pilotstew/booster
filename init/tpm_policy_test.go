@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/go-tpm/legacy/tpm2"
+	tpm2new "github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 	"github.com/stretchr/testify/require"
 )
@@ -81,3 +83,31 @@ func TestTPM2PolicyMismatchSurvivesWrapping(t *testing.T) {
 	require.Contains(t, err.Error(), "PCRs [10]", "the error should name the bound PCRs")
 }
 
+
+// TestClassifyTPMFailure pins the signed-path classification. The distinction is
+// the whole point: a policy the TPM refuses means this token cannot work on this
+// machine and the caller should move on, whereas an auth failure means the PIN
+// really was wrong and re-prompting is correct. Collapsing the two is what made a
+// moved PCR read as a forgotten PIN.
+func TestClassifyTPMFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rc       error
+		mismatch bool
+	}{
+		{"policy refused", tpm2new.TPMRCPolicyFail, true},
+		{"sealed to another TPM", tpm2new.TPMRCIntegrity, true},
+		{"wrong PIN", tpm2new.TPMRCAuthFail, false},
+		{"PCRs moved mid-session", tpm2new.TPMRCPCRChanged, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyTPMFailure("unseal", tc.rc)
+			require.Error(t, err)
+			require.Equal(t, tc.mismatch, errors.Is(err, errTPM2TokenMismatch),
+				"token-mismatch classification for %v", tc.rc)
+			// The underlying code stays reachable either way, so callers and logs
+			// can still see what the TPM actually said.
+			require.ErrorIs(t, err, tc.rc)
+		})
+	}
+}

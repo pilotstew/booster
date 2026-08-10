@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -131,7 +132,7 @@ func selectSignature(sigs map[string][]pcrSignature, bank string, pub *rsa.Publi
 			return e, nil
 		}
 	}
-	return pcrSignature{}, fmt.Errorf("no PCR signature for bank %q matching key %s and policy %s", bank, fp, want)
+	return pcrSignature{}, fmt.Errorf("%w (no PCR signature for bank %q matching key %s and policy %s)", errTPM2TokenMismatch, bank, fp, want)
 }
 
 // rsaPublicArea builds the TPM public area for an external RSA verification key,
@@ -199,7 +200,7 @@ func signedTPM2Unseal(t transport.TPM, srk tpm2.NamedHandle, public tpm2.TPM2BPu
 
 	loadRsp, err := (&tpm2.Load{ParentHandle: srk, InPrivate: private, InPublic: public}).Execute(t)
 	if err != nil {
-		return nil, fmt.Errorf("loading sealed object: %v", err)
+		return nil, classifyTPMFailure("loading sealed object", err)
 	}
 	defer flushHandle(t, loadRsp.ObjectHandle)
 	obj := tpm2.NamedHandle{Handle: loadRsp.ObjectHandle, Name: loadRsp.Name}
@@ -212,9 +213,29 @@ func signedTPM2Unseal(t transport.TPM, srk tpm2.NamedHandle, public tpm2.TPM2BPu
 		if err == nil {
 			return out, nil
 		}
+		// only the verification key's Name depends on the exponent, so only a policy
+		// mismatch can be an artefact of guessing wrong; reporting anything else as a
+		// mismatch would abort the PIN retry on a typo
+		if !errors.Is(err, errTPM2TokenMismatch) {
+			return nil, err
+		}
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+// classifyTPMFailure maps a TPM response code onto errTPM2TokenMismatch, mirroring
+// systemd's ERRNO_IS_NEG_TPM2_TOKEN_MISMATCH. TPMRCAuthFail (a wrong PIN, re-prompt)
+// and TPMRCPCRChanged (a PCR moving mid-session, systemd retries it) stay
+// unclassified on purpose.
+func classifyTPMFailure(stage string, err error) error {
+	switch {
+	case errors.Is(err, tpm2.TPMRCPolicyFail):
+		return fmt.Errorf("%w (%s rejected the current PCR state: %w)", errTPM2TokenMismatch, stage, err)
+	case errors.Is(err, tpm2.TPMRCIntegrity):
+		return fmt.Errorf("%w (%s: sealed to a different TPM: %w)", errTPM2TokenMismatch, stage, err)
+	}
+	return fmt.Errorf("%s: %w", stage, err)
 }
 
 func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string][]pcrSignature, bankName string, verifyKey *rsa.PublicKey, exp uint32, pubkeyPCRs, literalPCRs []int, pin []byte) ([]byte, error) {
@@ -239,7 +260,7 @@ func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string]
 		PCRSelect: tpm2.PCClientCompatible.PCRs(pcrsU...),
 	}}}
 	if _, err := (&tpm2.PolicyPCR{PolicySession: sess.Handle(), Pcrs: sel}).Execute(t); err != nil {
-		return nil, fmt.Errorf("PolicyPCR: %v", err)
+		return nil, classifyTPMFailure("PolicyPCR", err)
 	}
 
 	pgd, err := (&tpm2.PolicyGetDigest{PolicySession: sess.Handle()}).Execute(t)
@@ -266,7 +287,7 @@ func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string]
 		Signature: rsassaSHA256Sig(entry.Sig),
 	}).Execute(t)
 	if err != nil {
-		return nil, fmt.Errorf("verifying PCR signature: %v", err)
+		return nil, fmt.Errorf("%w (PCR signature does not verify under the enrolled key: %w)", errTPM2TokenMismatch, err)
 	}
 
 	if _, err := (&tpm2.PolicyAuthorize{
@@ -276,7 +297,7 @@ func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string]
 		KeySign:        le.Name,
 		CheckTicket:    vs.Validation,
 	}).Execute(t); err != nil {
-		return nil, fmt.Errorf("PolicyAuthorize: %v", err)
+		return nil, classifyTPMFailure("PolicyAuthorize", err)
 	}
 
 	// Literal (unsigned) PCRs are a plain PolicyPCR after the PolicyAuthorize,
@@ -292,7 +313,7 @@ func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string]
 			PCRSelect: tpm2.PCClientCompatible.PCRs(lpcrsU...),
 		}}}
 		if _, err := (&tpm2.PolicyPCR{PolicySession: sess.Handle(), Pcrs: lsel}).Execute(t); err != nil {
-			return nil, fmt.Errorf("PolicyPCR (literal): %v", err)
+			return nil, classifyTPMFailure("PolicyPCR (literal)", err)
 		}
 	}
 
@@ -308,7 +329,7 @@ func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string]
 		Auth:   sess,
 	}}).Execute(t)
 	if err != nil {
-		return nil, fmt.Errorf("unseal: %v", err)
+		return nil, classifyTPMFailure("unseal", err)
 	}
 	return unseal.OutData.Buffer, nil
 }
