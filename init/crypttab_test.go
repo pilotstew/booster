@@ -465,6 +465,73 @@ func TestUUIDLessListIsWithheldFromACrypttabDevice(t *testing.T) {
 	require.Equal(t, luksOptionUnset, int(m.tokenTimeout))
 }
 
+// Only crypttab withholds the UUID-less list. A per-device list does not: the
+// default still reaches the device, and the per-device list then overrides it
+// option by option.
+func TestUUIDLessListReachesADeviceWithAPerDeviceList(t *testing.T) {
+	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=discard,tries=3 rd.luks.options="+u+"=tries=9", "")
+	m := luksMappings[0]
+	require.Equal(t, []string{luks.FlagAllowDiscards}, m.options, "the default reaches it")
+	require.Equal(t, 9, m.tries, "the per-device list wins where both set an option")
+}
+
+// The message telling a user their UUID-less list was withheld has to be right
+// about the remedy: a per-device list pairs with a crypttab entry by UUID alone,
+// so proposing one for a LABEL= or path entry would build a second mapping for
+// the same device instead of overriding the first.
+func TestGlobalOptionsWithheldMessage(t *testing.T) {
+	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
+
+	t.Run("names the per-device form for a UUID entry", func(t *testing.T) {
+		resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=discard",
+			"cryptroot UUID="+u+" none luks\n")
+		msg := globalOptionsWithheldMessage(luksMappings[0])
+		require.Contains(t, msg, `"discard" not applied`)
+		require.Contains(t, msg, "rd.luks.options="+u+"=discard")
+	})
+
+	t.Run("withholds that advice from a label entry", func(t *testing.T) {
+		resolveSources(t, "rd.luks.options=discard", "cryptroot LABEL=crypt none luks\n")
+		msg := globalOptionsWithheldMessage(luksMappings[0])
+		require.Contains(t, msg, `"discard" not applied`)
+		require.NotContains(t, msg, "rd.luks.options=", "a per-device list cannot pair with a LABEL= entry")
+		require.Contains(t, msg, "change the entry's own options")
+	})
+
+	t.Run("says nothing about a header the global list never carried", func(t *testing.T) {
+		// header= is rejected while parsing a UUID-less list, so it is not
+		// something the device went without.
+		resolveSources(t, "rd.luks.options=header=/luks.hdr", "cryptroot UUID="+u+" none luks\n")
+		require.Empty(t, globalOptionsWithheldMessage(luksMappings[0]))
+	})
+
+	t.Run("names a repeated option once", func(t *testing.T) {
+		// the list records what was parsed, repeats included; the advice tells
+		// the user what to paste, so it must not
+		resolveSources(t, "rd.luks.options=discard rd.luks.options=discard,tries=2",
+			"cryptroot UUID="+u+" none luks\n")
+		require.Contains(t, globalOptionsWithheldMessage(luksMappings[0]), `"discard,tries=2" not applied`)
+	})
+
+	t.Run("says nothing when the list is empty", func(t *testing.T) {
+		resolveSources(t, "rd.luks.name="+u+"=cryptroot", "cryptroot UUID="+u+" none luks\n")
+		require.Empty(t, globalOptionsWithheldMessage(luksMappings[0]))
+	})
+}
+
+// A device carrying its own per-device list has nothing surprising to explain:
+// the UUID-less list is a default, and the user overrode it deliberately.
+func TestNoWithheldReportWhenAPerDeviceListExists(t *testing.T) {
+	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=discard rd.luks.options="+u+"=tries=4",
+		"cryptroot UUID="+u+" none luks\n")
+	m := luksMappings[0]
+	require.Empty(t, globalOptionsWithheldMessage(m))
+	require.Equal(t, 4, m.tries, "the per-device list stands")
+	require.Empty(t, m.options, "the UUID-less list is still withheld")
+}
+
 func TestUUIDLessListReachesADeviceCrypttabDoesNotDescribe(t *testing.T) {
 	const root = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
 	const other = "ab6d7d78-b816-4495-928d-766d6607035e"

@@ -332,8 +332,8 @@ func composeMapping(m *luksMapping) {
 	// devices nothing else describes, not an override of the ones it does.
 	if m.crypttabOptions == nil {
 		applyGlobalOptions(&merged)
-	} else if m.cmdlineOptions == nil {
-		reportGlobalOptionsWithheld(m)
+	} else if msg := globalOptionsWithheldMessage(m); msg != "" {
+		warning("%s", msg)
 	}
 
 	if h := m.deprecatedHeader; h != nil {
@@ -383,19 +383,23 @@ func applyGlobalOptions(dst *luksOptions) {
 	overlay(dst, &global)
 }
 
-// reportGlobalOptionsWithheld explains that a crypttab entry kept the UUID-less
-// list off this device.
-func reportGlobalOptionsWithheld(m *luksMapping) {
+// globalOptionsWithheldMessage says that a crypttab entry kept the UUID-less
+// list off this device, or returns "" when there is nothing to report.
+func globalOptionsWithheldMessage(m *luksMapping) string {
+	// A device carrying its own per-device list has nothing surprising to
+	// explain: the UUID-less list is a default and the user overrode it.
+	if m.cmdlineOptions != nil {
+		return ""
+	}
 	applied := joinOptions(globalDeviceOptions().appliedOptions)
 	if applied == "" {
-		return
+		return ""
 	}
 	// A per-device list pairs with an entry only when both name the device the
 	// same way, so advising it for a LABEL= or path entry would build a second
 	// mapping for the same device rather than override the first.
 	if uuid := m.cmdlineUUID(); uuid != "" {
-		warning("rd.luks.options: %s: %q not applied. A list without a UUID is only a default for devices with no crypttab entry. Use rd.luks.options=%s=%s to override the entry.", m.name, applied, uuid, applied)
-		return
+		return fmt.Sprintf("rd.luks.options: %s: %q not applied. A list without a UUID is only a default for devices with no crypttab entry. Use rd.luks.options=%s=%s to override the entry.", m.name, applied, uuid, applied)
 	}
-	warning("rd.luks.options: %s: %q not applied. A list without a UUID is only a default for devices with no crypttab entry; change the entry's own options to alter this device.", m.name, applied)
+	return fmt.Sprintf("rd.luks.options: %s: %q not applied. A list without a UUID is only a default for devices with no crypttab entry; change the entry's own options to alter this device.", m.name, applied)
 }
