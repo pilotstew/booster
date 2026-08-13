@@ -115,10 +115,11 @@ func TestFlagsAreNotDuplicated(t *testing.T) {
 	require.Len(t, mappings, 1)
 	require.Equal(t, []string{luks.FlagAllowDiscards}, mappings[0].options)
 
-	// and once when two sources each name it
+	// and once when two sources each name it. crypttab cannot be one of those
+	// two here: a device it describes never receives the UUID-less list, so the
+	// pair that can both reach one device is that list and a per-device one.
 	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
-	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=discard",
-		"cryptroot UUID="+u+" none luks,discard\n")
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=discard rd.luks.options="+u+"=discard", "")
 	require.Equal(t, []string{luks.FlagAllowDiscards}, luksMappings[0].options)
 }
 
@@ -421,6 +422,61 @@ func TestGlobalKeyfileTimeoutTakesEffect(t *testing.T) {
 	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=keyfile-timeout=0", "")
 	require.Equal(t, time.Duration(0), resolveKeyfileTimeout(luksMappings[0], 60))
 }
+
+func TestPerDeviceListReplacesCrypttabOptions(t *testing.T) {
+	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
+
+	// systemd-cryptsetup replaces an entry's option field when a per-device
+	// rd.luks.options= names the device, so the command line can remove an
+	// option and not only add one. tries= comes from the cmdline; discard and
+	// key-slot= were only in crypttab and do not survive.
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=tries=9",
+		"cryptroot UUID="+u+" none luks,tries=2,discard,key-slot=3\n")
+	require.Len(t, luksMappings, 1)
+	m := luksMappings[0]
+	require.Equal(t, 9, m.tries)
+	require.Empty(t, m.options)
+	require.Equal(t, luksOptionUnset, m.keySlot)
+}
+
+func TestReplacedEntryKeepsItsKeyfile(t *testing.T) {
+	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
+
+	// The keyfile is crypttab's third field, not an option, so it survives the
+	// replacement. keyfile-offset= and keyfile-size= are options and do not.
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=tries=9",
+		"cryptroot UUID="+u+" /etc/luks.key luks,keyfile-offset=4096,keyfile-size=64\n")
+	m := luksMappings[0]
+	require.Equal(t, "/etc/luks.key", m.keyfile)
+	require.Zero(t, m.keyfileOffset)
+	require.Zero(t, m.keyfileSize)
+}
+
+func TestUUIDLessListIsWithheldFromACrypttabDevice(t *testing.T) {
+	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
+
+	// A list with no UUID is a default for devices nothing else describes. This
+	// device has a crypttab entry, so the entry stands alone.
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=discard,token-timeout=90",
+		"cryptroot UUID="+u+" none luks,tries=2\n")
+	m := luksMappings[0]
+	require.Empty(t, m.options, "the withheld list's discard did not reach it")
+	require.Equal(t, 2, m.tries, "the entry's own options stand")
+	require.Equal(t, luksOptionUnset, int(m.tokenTimeout))
+}
+
+func TestUUIDLessListReachesADeviceCrypttabDoesNotDescribe(t *testing.T) {
+	const root = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
+	const other = "ab6d7d78-b816-4495-928d-766d6607035e"
+
+	// Same list, but crypttab covers only the other device, so it still applies.
+	resolveSources(t, "rd.luks.name="+root+"=cryptroot rd.luks.options=discard,token-timeout=90",
+		"data UUID="+other+" none luks\n")
+	m := luksMappings[0]
+	require.Equal(t, []string{luks.FlagAllowDiscards}, m.options)
+	require.Equal(t, 90*time.Second, m.tokenTimeout)
+}
+
 func TestCmdlineOptionsSurviveACrypttabParseError(t *testing.T) {
 	// The options are composed once, after crypttab is read. If that composition
 	// were skipped when the file fails to parse, every rd.luks.* option would be
@@ -539,20 +595,20 @@ func TestCmdlineTriesZeroOutranksCrypttab(t *testing.T) {
 	// tries=0 means unlimited retries. While unset was also 0 it was
 	// indistinguishable, so crypttab's tries= overwrote it.
 	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
-	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=tries=0",
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=tries=0",
 		"cryptroot UUID="+u+" none luks,tries=3\n")
 	require.Equal(t, 0, luksMappings[0].tries, "an explicit tries=0 outranks the crypttab entry")
 }
 
-func TestCmdlineOutranksCrypttabPerField(t *testing.T) {
+func TestPerDeviceListReplacesTheEntrysOptions(t *testing.T) {
 	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
-	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=key-slot=2,tries=5",
+	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=key-slot=2,tries=5",
 		"cryptroot UUID="+u+" /crypttab/key luks,key-slot=1,tries=9,header=/crypttab/hdr\n")
 	m := luksMappings[0]
-	require.Equal(t, 2, m.keySlot, "cmdline key-slot wins")
-	require.Equal(t, 5, m.tries, "cmdline tries wins")
-	require.Equal(t, "/crypttab/key", m.keyfile, "crypttab supplies what the cmdline did not")
-	require.Equal(t, "/crypttab/hdr", m.header)
+	require.Equal(t, 2, m.keySlot)
+	require.Equal(t, 5, m.tries)
+	require.Empty(t, m.header, "the entry's option field is replaced whole")
+	require.Equal(t, "/crypttab/key", m.keyfile, "its first three fields survive")
 }
 
 // An explicit token-timeout= on the kernel cmdline must outrank a crypttab
@@ -566,13 +622,13 @@ func TestCmdlineTokenTimeoutOutranksCrypttab(t *testing.T) {
 	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
 
 	t.Run("crypttab omits it, the cmdline value survives", func(t *testing.T) {
-		resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=token-timeout=10",
+		resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=token-timeout=10",
 			"cryptroot UUID="+u+" none luks\n")
 		require.Equal(t, 10*time.Second, luksMappings[0].tokenTimeout)
 	})
 
 	t.Run("both set it, the cmdline still wins", func(t *testing.T) {
-		resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=token-timeout=10",
+		resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=token-timeout=10",
 			"cryptroot UUID="+u+" none luks,token-timeout=60\n")
 		require.Equal(t, 10*time.Second, luksMappings[0].tokenTimeout)
 	})
@@ -760,46 +816,6 @@ func TestJoinOptionsDropsRepeats(t *testing.T) {
 	require.Equal(t, "", joinOptions(nil))
 }
 
-func TestPerDeviceListReplacesCrypttabOptions(t *testing.T) {
-	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
-
-	// systemd-cryptsetup replaces an entry's option field when a per-device
-	// rd.luks.options= names the device, so the command line can remove an
-	// option and not only add one. tries= comes from the cmdline; discard and
-	// key-slot= were only in crypttab and do not survive.
-	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=tries=9",
-		"cryptroot UUID="+u+" none luks,tries=2,discard,key-slot=3\n")
-	require.Len(t, luksMappings, 1)
-	m := luksMappings[0]
-	require.Equal(t, 9, m.tries)
-	require.Empty(t, m.options)
-	require.Equal(t, luksOptionUnset, m.keySlot)
-}
-
-func TestReplacedEntryKeepsItsKeyfile(t *testing.T) {
-	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
-
-	// The keyfile is crypttab's third field, not an option, so it survives the
-	// replacement. keyfile-offset= and keyfile-size= are options and do not.
-	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options="+u+"=tries=9",
-		"cryptroot UUID="+u+" /etc/luks.key luks,keyfile-offset=4096,keyfile-size=64\n")
-	m := luksMappings[0]
-	require.Equal(t, "/etc/luks.key", m.keyfile)
-	require.Zero(t, m.keyfileOffset)
-	require.Zero(t, m.keyfileSize)
-}
-
-func TestCrypttabMergesWhenNoPerDeviceList(t *testing.T) {
-	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
-
-	// Without a per-device list nothing about the merge changes: the command
-	// line still takes precedence and crypttab still fills what it left unset.
-	resolveSources(t, "rd.luks.name="+u+"=cryptroot rd.luks.options=discard",
-		"cryptroot UUID="+u+" none luks,tries=2\n")
-	m := luksMappings[0]
-	require.Equal(t, []string{luks.FlagAllowDiscards}, m.options)
-	require.Equal(t, 2, m.tries)
-}
 func TestCrypttabKeyfileAndItsTimeoutSurvive(t *testing.T) {
 	const u = "fc5197e2-df8f-43a6-9cc7-658dead3cfa4"
 	resolveSources(t, "rd.luks.name="+u+"=cryptroot",

@@ -420,3 +420,15 @@ func parseTokenTimeout(s string) (time.Duration, error) {
 	}
 	return d, nil
 }
+
+// cmdlineUUID returns the UUID a per-device rd.luks.options= would have to name
+// to reach this mapping, or "" when the device is referenced some other way:
+// deviceRefEqual pairs the two only when both name the device the same way.
+func (m *luksMapping) cmdlineUUID() string {
+	if m.ref != nil && m.ref.format == refFsUUID {
+		if u, ok := m.ref.data.(UUID); ok {
+			return u.toString()
+		}
+	}
+	return ""
+}

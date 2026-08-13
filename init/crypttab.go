@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -326,7 +327,15 @@ func composeMapping(m *luksMapping) {
 			overlay(&merged, ct)
 		}
 	}
-	applyGlobalOptions(&merged)
+	// systemd applies a list carrying no UUID to "any UUIDs not specified
+	// elsewhere, and without an entry in /etc/crypttab": it is a default for
+	// devices nothing else describes, not an override of the ones it does.
+	if m.crypttabOptions == nil {
+		applyGlobalOptions(&merged)
+	} else if m.cmdlineOptions == nil {
+		reportGlobalOptionsWithheld(m)
+	}
+
 	if h := m.deprecatedHeader; h != nil {
 		overlay(&merged, h)
 	}
@@ -355,11 +364,38 @@ func deviceRefEqual(a, b *deviceRef) bool {
 	}
 }
 
-// applyGlobalOptions overlays the rd.luks.options= list that carried no UUID.
-// A global header= was warned about while parsing; it is dropped here so it
-// cannot reach a device.
+// globalDeviceOptions returns the rd.luks.options= list that carried no UUID as
+// a device would receive it. A global header= was warned about while parsing, so
+// it is dropped from the options and from appliedOptions alike: it neither
+// reaches a device nor is named as something a device went without.
+func globalDeviceOptions() luksOptions {
+	o := globalLuksOptions
+	o.header, o.headerDeviceRef = "", nil
+	o.appliedOptions = slices.DeleteFunc(slices.Clone(o.appliedOptions), func(opt string) bool {
+		key, _, _ := strings.Cut(opt, "=")
+		return key == "header"
+	})
+	return o
+}
+
 func applyGlobalOptions(dst *luksOptions) {
-	global := globalLuksOptions
-	global.header, global.headerDeviceRef = "", nil
+	global := globalDeviceOptions()
 	overlay(dst, &global)
+}
+
+// reportGlobalOptionsWithheld explains that a crypttab entry kept the UUID-less
+// list off this device.
+func reportGlobalOptionsWithheld(m *luksMapping) {
+	applied := joinOptions(globalDeviceOptions().appliedOptions)
+	if applied == "" {
+		return
+	}
+	// A per-device list pairs with an entry only when both name the device the
+	// same way, so advising it for a LABEL= or path entry would build a second
+	// mapping for the same device rather than override the first.
+	if uuid := m.cmdlineUUID(); uuid != "" {
+		warning("rd.luks.options: %s: %q not applied. A list without a UUID is only a default for devices with no crypttab entry. Use rd.luks.options=%s=%s to override the entry.", m.name, applied, uuid, applied)
+		return
+	}
+	warning("rd.luks.options: %s: %q not applied. A list without a UUID is only a default for devices with no crypttab entry; change the entry's own options to alter this device.", m.name, applied)
 }
