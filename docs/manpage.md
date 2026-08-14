@@ -262,9 +262,14 @@ the file by either being ran as root, or by being passed
 > this warning is irrelevant with x-initrd.attach
 
 
-Crypttab entries and `rd.luks.*` parameters with the same LUKS UUID are
+Crypttab entries and `rd.luks.*` parameters describing the same device are
 merged, with cmdline parameters taking precedence and unspecified options
-being added from crypttab.
+being added from crypttab. The two sources need not name the device the
+same way: an entry written `LABEL=`, `WWID=` or as a path is matched to a
+`rd.luks.*` parameter written `$UUID` once the device appears and both
+spellings are known to resolve to it. The volume name and device
+reference then come from the command line, the key file and options from
+whichever source outranks the other for that field.
 
 A per-device `rd.luks.options=$UUID=` is the exception: it *replaces* that
 entry's options instead of adding to them, so the command line can remove

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -759,4 +760,69 @@ func TestAutodiscoveredRootGetsGlobalOptions(t *testing.T) {
 	require.Equal(t, []string{luks.FlagAllowDiscards}, m.options)
 	require.Equal(t, 5, m.tries)
 	require.Empty(t, m.header, "a global header= must not reach a device")
+}
+
+// A crypttab entry and a command-line parameter can name one disk differently.
+// Which spelling was used is not something either source can resolve: only the
+// device itself knows it answers to both. Until it appears they are two
+// records, and folding them is what makes the entry take effect.
+func TestMappingsForOneDeviceAreFolded(t *testing.T) {
+	withLuksGlobals(t)
+	origGlobal := globalLuksOptions
+	t.Cleanup(func() { globalLuksOptions = origGlobal })
+
+	const u = "ab6d7d78-b816-4495-928d-766d6607035e"
+	uuid, err := parseUUID(u)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name     string
+		ctDevice string
+		blk      *blkInfo
+	}{
+		{"label", "LABEL=crypt", &blkInfo{path: "/dev/sda2", format: "luks", uuid: uuid, label: "crypt"}},
+		{"path", "/dev/sda2", &blkInfo{path: "/dev/sda2", format: "luks", uuid: uuid}},
+		{"wwid", "WWID=scsi-360", &blkInfo{path: "/dev/sda2", format: "luks", uuid: uuid, wwid: []string{"scsi-360"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			luksMappings = nil
+			globalLuksOptions = newLuksOptions()
+			require.NoError(t, parseParams("rd.luks.name="+u+"=root"))
+			ct, err := parseCrypttabReader(strings.NewReader(
+				"cryptroot " + tc.ctDevice + " /entry.key luks,tries=7\n"))
+			require.NoError(t, err)
+			resolveLuksOptions(ct)
+			require.Len(t, luksMappings, 2, "two records until the device resolves them")
+
+			m := matchLuksMapping(tc.blk)
+			require.NotNil(t, m)
+			require.Equal(t, "root", m.name, "the command line names the volume")
+			require.Equal(t, "/entry.key", m.keyfile, "the entry's key file takes effect")
+			require.Equal(t, 7, m.tries, "and its options do too")
+			require.Len(t, luksMappings, 1, "the absorbed record must not be unlocked separately")
+		})
+	}
+}
+
+// Folding must not let a crypttab entry outrank the command line.
+func TestFoldedMappingKeepsCmdlinePrecedence(t *testing.T) {
+	withLuksGlobals(t)
+	origGlobal := globalLuksOptions
+	t.Cleanup(func() { globalLuksOptions = origGlobal })
+
+	const u = "ab6d7d78-b816-4495-928d-766d6607035e"
+	uuid, err := parseUUID(u)
+	require.NoError(t, err)
+
+	luksMappings = nil
+	globalLuksOptions = newLuksOptions()
+	require.NoError(t, parseParams("rd.luks.name="+u+"=root rd.luks.key="+u+"=/cmdline.key rd.luks.options="+u+"=tries=2"))
+	ct, err := parseCrypttabReader(strings.NewReader("cryptroot LABEL=crypt /entry.key luks,tries=7,discard\n"))
+	require.NoError(t, err)
+	resolveLuksOptions(ct)
+
+	m := matchLuksMapping(&blkInfo{path: "/dev/sda2", format: "luks", uuid: uuid, label: "crypt"})
+	require.Equal(t, "/cmdline.key", m.keyfile, "rd.luks.key= wins field 3")
+	require.Equal(t, 2, m.tries, "the per-device list wins field 4")
+	require.Empty(t, m.options, "and it replaces the entry's options rather than adding to them")
 }

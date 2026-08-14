@@ -94,6 +94,11 @@ type luksMapping struct {
 	crypttabOptions *luksOptions
 	cmdlineOptions  *luksOptions // a per-device rd.luks.options=$UUID=
 
+	// fromCrypttab marks a mapping an /etc/crypttab entry produced on its own,
+	// which decides whose name and device reference survive if it turns out to
+	// describe a device the command line also named.
+	fromCrypttab bool
+
 	// deprecatedHeader carries rd.luks.header=, booster's own spelling for a
 	// detached header. systemd has no such parameter -- it is only ever the
 	// header= option -- so this slot exists to be deleted with it.
@@ -1995,16 +2000,15 @@ func unreachableMapperName() (string, bool) {
 }
 
 func matchLuksMapping(blk *blkInfo) *luksMapping {
-	for _, m := range luksMappings {
-		if blk.matchesRef(m.ref) {
-			// Mirror the synthesis-fallback remap so root=UUID=<luks-uuid>
-			// keeps working after a crypttab/rd.luks.* entry adds the mapping.
-			if blk.matchesRef(cmdRoot) {
-				info("LUKS device %s matches root=, re-pointing root to /dev/mapper/%s", blk.path, m.name)
-				cmdRoot = &deviceRef{format: refPath, data: "/dev/mapper/" + m.name}
-			}
-			return m
+	if matched := matchingLuksMappings(blk); len(matched) > 0 {
+		m := foldLuksMappings(matched)
+		// Mirror the synthesis-fallback remap so root=UUID=<luks-uuid>
+		// keeps working after a crypttab/rd.luks.* entry adds the mapping.
+		if blk.matchesRef(cmdRoot) {
+			info("LUKS device %s matches root=, re-pointing root to /dev/mapper/%s", blk.path, m.name)
+			cmdRoot = &deviceRef{format: refPath, data: "/dev/mapper/" + m.name}
 		}
+		return m
 	}
 
 	// a special case coming from autodiscoverable partitions https://systemd.io/DISCOVERABLE_PARTITIONS/
@@ -2020,6 +2024,52 @@ func matchLuksMapping(blk *blkInfo) *luksMapping {
 	}
 
 	return nil
+}
+
+// matchingLuksMappings returns every mapping this device answers to. There can
+// be more than one: the sources name a device however the user wrote it, and
+// two spellings are only known to mean one disk once the disk is here.
+func matchingLuksMappings(blk *blkInfo) []*luksMapping {
+	var matched []*luksMapping
+	for _, m := range luksMappings {
+		if blk.matchesRef(m.ref) {
+			matched = append(matched, m)
+		}
+	}
+	return matched
+}
+
+// foldLuksMappings folds several records of one device into the one booster
+// unlocks. The command line keeps the volume name and device reference, an
+// entry contributes the fourth crypttab field and the key file it named, and
+// the result is composed again now that every source for the device is known.
+func foldLuksMappings(matched []*luksMapping) *luksMapping {
+	primary := matched[0]
+	for _, m := range matched {
+		if !m.fromCrypttab {
+			primary = m
+			break
+		}
+	}
+	if len(matched) == 1 {
+		return primary
+	}
+
+	for _, m := range matched {
+		if m == primary {
+			continue
+		}
+		info("LUKS device is described twice, as %q and %q; folding into %q", primary.name, m.name, primary.name)
+		if primary.crypttabOptions == nil {
+			primary.crypttabOptions = m.crypttabOptions
+		}
+		if primary.keyfile == "" {
+			primary.keyfile, primary.keyfileDeviceRef = m.keyfile, m.keyfileDeviceRef
+		}
+		luksMappings = slices.DeleteFunc(luksMappings, func(x *luksMapping) bool { return x == m })
+	}
+	composeMapping(primary)
+	return primary
 }
 
 func handleLuksBlockDevice(blk *blkInfo) error {

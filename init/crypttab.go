@@ -287,6 +287,7 @@ func resolveLuksOptions(ctMappings []*luksMapping) {
 			// a device nothing else names: its own entry is its only source,
 			// and it is composed below like any other
 			cm.crypttabOptions = &opts
+			cm.fromCrypttab = true
 			luksMappings = append(luksMappings, cm)
 			continue
 		}
@@ -304,29 +305,36 @@ func resolveLuksOptions(ctMappings []*luksMapping) {
 	}
 
 	for _, m := range luksMappings {
-		merged := newLuksOptions()
-
-		if ct := m.crypttabOptions; ct != nil {
-			if m.cmdlineOptions != nil {
-				// A per-device rd.luks.options= replaces the entry's option
-				// field, so the entry contributes none of it.
-				if len(ct.appliedOptions) > 0 {
-					warning("crypttab: entry %q: options %q dropped. A per-device rd.luks.options= replaces a crypttab entry's options rather than adding to them. Repeat on the command line any that are still needed.", m.name, joinOptions(ct.appliedOptions))
-				}
-			} else {
-				overlay(&merged, ct)
-			}
-		}
-		applyGlobalOptions(&merged)
-		if h := m.deprecatedHeader; h != nil {
-			overlay(&merged, h)
-		}
-		if pd := m.cmdlineOptions; pd != nil {
-			overlay(&merged, pd)
-		}
-
-		m.luksOptions = merged
+		composeMapping(m)
 	}
+}
+
+// composeMapping folds a device's sources into its options, lowest priority
+// first. Kept separate from resolveLuksOptions because a device that turns out
+// to be described twice is composed again once that is known.
+func composeMapping(m *luksMapping) {
+	merged := newLuksOptions()
+
+	if ct := m.crypttabOptions; ct != nil {
+		if m.cmdlineOptions != nil {
+			// A per-device rd.luks.options= replaces the entry's option
+			// field, so the entry contributes none of it.
+			if len(ct.appliedOptions) > 0 {
+				warning("crypttab: entry %q: options %q dropped. A per-device rd.luks.options= replaces a crypttab entry's options rather than adding to them. Repeat on the command line any that are still needed.", m.name, joinOptions(ct.appliedOptions))
+			}
+		} else {
+			overlay(&merged, ct)
+		}
+	}
+	applyGlobalOptions(&merged)
+	if h := m.deprecatedHeader; h != nil {
+		overlay(&merged, h)
+	}
+	if pd := m.cmdlineOptions; pd != nil {
+		overlay(&merged, pd)
+	}
+
+	m.luksOptions = merged
 }
 
 // deviceRefEqual reports whether two deviceRefs refer to the same device.
