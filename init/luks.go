@@ -273,6 +273,23 @@ func acquireFido2Lock(ctx context.Context) error {
 
 func releaseFido2Lock() { <-fido2Sem }
 
+// clevisHardwareNotReady reports whether a clevis pin failed because its device
+// has not appeared yet, rather than because the binding cannot be satisfied.
+// libykpers has three words for it: "no yubikey present" while the key is still
+// enumerating, "USB error" once it is there but not yet answering, and "No such
+// device" when it goes away mid-operation, which a re-enumerating hub can do.
+// Only the second was recognised, so a key that had not enumerated by the time
+// the token
+// was tried lost the race against the keyboard permanently: recoverTokenPassword
+// gives each token one attempt, and the retry loop here is what keeps a token in
+// the race while the passphrase prompt waits.
+func clevisHardwareNotReady(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "USB error") ||
+		strings.Contains(msg, "no yubikey present") ||
+		strings.Contains(msg, "No such device")
+}
+
 func recoverClevisPassword(ctx context.Context, t luks.Token, luksVersion int) ([]byte, error) {
 	var payload []byte
 	// Note that token metadata stored differently in LUKS v1 and v2
@@ -308,8 +325,7 @@ func recoverClevisPassword(ctx context.Context, t luks.Token, luksVersion int) (
 					// timed out waiting for tpm
 					return nil, err
 				}
-			} else if strings.Contains(err.Error(), "USB error") {
-				// USB device not yet ready (e.g. YubiKey still enumerating).
+			} else if clevisHardwareNotReady(err) {
 				if time.Now().After(deadline) {
 					return nil, fmt.Errorf("timeout waiting for USB device")
 				}
@@ -960,9 +976,9 @@ func tokenBindsPCR15(t luks.Token) bool {
 type latchMode int
 
 const (
-	latchNone     latchMode = iota // do not extend PCR15
-	latchRequired                  // extend, fail-closed (the key is bound to PCR15)
-	latchDefensive                 // extend, best-effort (no PCR15 token, but a TPM is present)
+	latchNone      latchMode = iota // do not extend PCR15
+	latchRequired                   // extend, fail-closed (the key is bound to PCR15)
+	latchDefensive                  // extend, best-effort (no PCR15 token, but a TPM is present)
 )
 
 // volumeKeyLatchMode maps the unlock context to a latch mode. tpm2-measure-pcr=
