@@ -16,6 +16,10 @@ mount=$(mktemp -d)
 sudo mount "${lodev}" "${mount}"
 
 mkdir -p assets/voidlinux
+# The copies below run under sudo, so a run interrupted before the chown at the
+# end leaves this directory owned by root. mkdir -p does not correct that, and
+# the unprivileged write further down then fails.
+sudo chown "${USER}" assets/voidlinux
 
 wget https://raw.githubusercontent.com/void-linux/void-packages/master/common/repo-keys/60%3Aae%3A0c%3Ad6%3Af0%3A95%3A17%3A80%3Abc%3A93%3A46%3A7a%3A89%3Aaf%3Aa3%3A2d.plist
 sudo mkdir -p "${mount}/var/db/xbps/keys/"
