@@ -2,12 +2,11 @@ package main
 
 import (
 	"errors"
+	"net"
 	"testing"
 
 	legacytpm2 "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpm2"
-	"github.com/google/go-tpm/tpm2/transport"
-	"github.com/google/go-tpm/tpmutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,7 +19,7 @@ func currentPolicyDigest(t *testing.T, pcrs []int, bankName string, usePIN bool)
 	dev, err := openTPM()
 	require.NoError(t, err)
 	defer dev.Close()
-	th := transport.FromReadWriteCloser(dev)
+	th := dev
 
 	sess, cleanup, err := tpm2.PolicySession(th, tpm2.TPMAlgSHA256, 16)
 	require.NoError(t, err)
@@ -68,7 +67,7 @@ func TestTPM2PolicySatisfiableDetectsMovedPCR(t *testing.T) {
 	// Move a bound PCR, as toggling Secure Boot or a firmware update would.
 	dev, err := openTPM()
 	require.NoError(t, err)
-	require.NoError(t, legacytpm2.PCRExtend(dev, tpmutil.Handle(pcr), legacytpm2.AlgSHA256, make([]byte, 32), ""))
+	require.NoError(t, extendPCR(dev, pcr, tpm2.TPMAlgSHA256, make([]byte, 32)))
 	require.NoError(t, dev.Close())
 
 	err = tpm2PolicySatisfiable(pcrs, bank, enrolled, true)
@@ -132,12 +131,13 @@ func TestUnsealSRKTemplateMatchesLegacy(t *testing.T) {
 	enableSwEmulator = true
 	t.Cleanup(func() { enableSwEmulator = false })
 
-	dev, err := openTPM()
+	// The reference primary is built through the legacy API, which cannot take the
+	// transport openTPM now returns, so it gets its own connection. swtpm serves
+	// one client at a time, so this phase must finish and close before openTPM.
+	legacyConn, err := net.Dial("tcp", swEmulatorAddr)
 	require.NoError(t, err)
-	defer dev.Close()
 
-	// The template booster used before the move to the new go-tpm API.
-	legacyHandle, _, err := legacytpm2.CreatePrimary(dev, legacytpm2.HandleOwner, legacytpm2.PCRSelection{}, "", "", legacytpm2.Public{
+	legacyHandle, _, err := legacytpm2.CreatePrimary(legacyConn, legacytpm2.HandleOwner, legacytpm2.PCRSelection{}, "", "", legacytpm2.Public{
 		Type:       legacytpm2.AlgECC,
 		NameAlg:    legacytpm2.AlgSHA256,
 		Attributes: legacytpm2.FlagStorageDefault,
@@ -147,11 +147,16 @@ func TestUnsealSRKTemplateMatchesLegacy(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	_, legacyName, _, err := legacytpm2.ReadPublic(dev, legacyHandle)
+	_, legacyName, _, err := legacytpm2.ReadPublic(legacyConn, legacyHandle)
 	require.NoError(t, err)
-	require.NoError(t, legacytpm2.FlushContext(dev, legacyHandle))
+	require.NoError(t, legacytpm2.FlushContext(legacyConn, legacyHandle))
+	require.NoError(t, legacyConn.Close())
 
-	th := transport.FromReadWriteCloser(dev)
+	dev, err := openTPM()
+	require.NoError(t, err)
+	defer dev.Close()
+
+	th := dev
 	srk, flush, err := loadUnsealSRK(th, 0)
 	require.NoError(t, err)
 	defer flush()

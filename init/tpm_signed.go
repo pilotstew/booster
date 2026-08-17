@@ -358,7 +358,7 @@ func recoverSignedTPM2Password(public, private []byte, pcrBankName string, pubke
 		return nil, err
 	}
 	defer dev.Close()
-	thetpm := transport.FromReadWriteCloser(dev)
+	thetpm := dev
 
 	srk, flush, err := loadUnsealSRK(thetpm, srkHandle)
 	if err != nil {

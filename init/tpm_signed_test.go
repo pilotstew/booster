@@ -229,7 +229,7 @@ func newSignedRig(t *testing.T) *signedRig {
 	dev, err := openTPM()
 	require.NoError(t, err)
 	t.Cleanup(func() { dev.Close() })
-	thetpm := transport.FromReadWriteCloser(dev)
+	thetpm := dev
 
 	srkRsp, err := (&tpm2.CreatePrimary{PrimaryHandle: tpm2.TPMRHOwner, InPublic: tpm2.New2B(tpm2.ECCSRKTemplate)}).Execute(thetpm)
 	require.NoError(t, err)

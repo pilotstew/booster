@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/go-tpm/tpm2"
-	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -112,7 +111,7 @@ func readPCRIndex(t *testing.T, bank tpm2.TPMAlgID, idx int) []byte {
 			Hash:      bank,
 			PCRSelect: tpm2.PCClientCompatible.PCRs(uint(idx)),
 		}}},
-	}.Execute(transport.FromReadWriteCloser(dev))
+	}.Execute(dev)
 	require.NoError(t, err)
 	require.Len(t, rsp.PCRValues.Digests, 1)
 	return rsp.PCRValues.Digests[0].Buffer

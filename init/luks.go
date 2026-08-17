@@ -21,7 +21,7 @@ import (
 
 	"github.com/anatol/clevis.go"
 	"github.com/anatol/luks.go"
-	"github.com/google/go-tpm/tpmutil"
+	"github.com/google/go-tpm/tpm2"
 	"golang.org/x/sys/unix"
 )
 
@@ -1064,7 +1064,7 @@ func recoverSystemdTPM2Password(ctx context.Context, t luks.Token, mappingName s
 		return nil, err
 	}
 
-	var srkHandle tpmutil.Handle
+	var srkHandle tpm2.TPMHandle
 	if node.Srk != "" {
 		srkBytes, err := base64.StdEncoding.DecodeString(node.Srk)
 		if err != nil {

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/anatol/luks.go"
-	"github.com/google/go-tpm/tpmutil"
+	"github.com/google/go-tpm/tpm2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,24 +26,24 @@ func TestExtractSRKHandle(t *testing.T) {
 	t.Parallel()
 
 	// Well-formed bytes with standard systemd SRK handle.
-	require.Equal(t, tpmutil.Handle(0x81000001), extractSRKHandle(iesysBytes(0x81000001)))
+	require.Equal(t, tpm2.TPMHandle(0x81000001), extractSRKHandle(iesysBytes(0x81000001)))
 
 	// Well-formed bytes with a non-standard persistent handle.
-	require.Equal(t, tpmutil.Handle(0x81000002), extractSRKHandle(iesysBytes(0x81000002)))
+	require.Equal(t, tpm2.TPMHandle(0x81000002), extractSRKHandle(iesysBytes(0x81000002)))
 
 	// Wrong magic → falls back to 0x81000001.
 	bad := iesysBytes(0x81000099)
 	binary.BigEndian.PutUint32(bad[0:4], 0xdeadbeef)
-	require.Equal(t, tpmutil.Handle(0x81000001), extractSRKHandle(bad))
+	require.Equal(t, tpm2.TPMHandle(0x81000001), extractSRKHandle(bad))
 
 	// Buffer too short → falls back to 0x81000001.
-	require.Equal(t, tpmutil.Handle(0x81000001), extractSRKHandle([]byte{0x69, 0x65, 0x73, 0x79}))
+	require.Equal(t, tpm2.TPMHandle(0x81000001), extractSRKHandle([]byte{0x69, 0x65, 0x73, 0x79}))
 
 	// Empty → falls back to 0x81000001.
-	require.Equal(t, tpmutil.Handle(0x81000001), extractSRKHandle(nil))
+	require.Equal(t, tpm2.TPMHandle(0x81000001), extractSRKHandle(nil))
 
 	// Handle field is zero → falls back to 0x81000001.
-	require.Equal(t, tpmutil.Handle(0x81000001), extractSRKHandle(iesysBytes(0)))
+	require.Equal(t, tpm2.TPMHandle(0x81000001), extractSRKHandle(iesysBytes(0)))
 }
 
 func TestResolveKeyfileTimeout(t *testing.T) {
@@ -520,15 +520,15 @@ type fenceFakeLuksDevice struct {
 func (f *fenceFakeLuksDevice) UnsealVolume(keyslot int, passphrase []byte) (*luks.Volume, error) {
 	return f.unseal(keyslot, passphrase)
 }
-func (f *fenceFakeLuksDevice) Close() error                                              { return nil }
-func (f *fenceFakeLuksDevice) Version() int                                              { return 2 }
-func (f *fenceFakeLuksDevice) Path() string                                              { return "/dev/fake" }
-func (f *fenceFakeLuksDevice) UUID() string                                              { return "" }
-func (f *fenceFakeLuksDevice) Slots() []int                                              { return []int{0} }
-func (f *fenceFakeLuksDevice) Tokens() ([]luks.Token, error)                             { return nil, nil }
-func (f *fenceFakeLuksDevice) FlagsGet() []string                                        { return nil }
-func (f *fenceFakeLuksDevice) FlagsAdd(flags ...string) error                            { return nil }
-func (f *fenceFakeLuksDevice) FlagsClear()                                               {}
+func (f *fenceFakeLuksDevice) Close() error                   { return nil }
+func (f *fenceFakeLuksDevice) Version() int                   { return 2 }
+func (f *fenceFakeLuksDevice) Path() string                   { return "/dev/fake" }
+func (f *fenceFakeLuksDevice) UUID() string                   { return "" }
+func (f *fenceFakeLuksDevice) Slots() []int                   { return []int{0} }
+func (f *fenceFakeLuksDevice) Tokens() ([]luks.Token, error)  { return nil, nil }
+func (f *fenceFakeLuksDevice) FlagsGet() []string             { return nil }
+func (f *fenceFakeLuksDevice) FlagsAdd(flags ...string) error { return nil }
+func (f *fenceFakeLuksDevice) FlagsClear()                    {}
 func (f *fenceFakeLuksDevice) Unlock(keyslot int, passphrase []byte, dmName string) error {
 	return nil
 }

@@ -8,16 +8,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
-	legacytpm2 "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
-	"github.com/google/go-tpm/tpmutil"
+	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -28,20 +26,30 @@ var enableSwEmulator bool
 // for a fixed port.
 var swEmulatorAddr = ":2321"
 
-func openTPM() (io.ReadWriteCloser, error) {
-	var dev io.ReadWriteCloser
-	var err error
+func openTPM() (transport.TPMCloser, error) {
+	var dev transport.TPMCloser
 
 	if enableSwEmulator {
-		dev, err = net.Dial("tcp", swEmulatorAddr)
+		conn, err := net.Dial("tcp", swEmulatorAddr)
+		if err != nil {
+			return nil, err
+		}
+		dev = transport.FromReadWriteCloser(conn)
 	} else {
-		dev, err = legacytpm2.OpenTPM("/dev/tpmrm0")
-	}
-	if err != nil {
-		return nil, err
+		var err error
+		if dev, err = linuxtpm.Open("/dev/tpmrm0"); err != nil {
+			return nil, err
+		}
 	}
 
-	if _, err := legacytpm2.GetManufacturer(dev); err != nil {
+	// reading a fixed property doubles as the "is this a TPM 2.0" probe the
+	// legacy GetManufacturer call used to serve
+	if _, err := (tpm2.GetCapability{
+		Capability:    tpm2.TPMCapTPMProperties,
+		Property:      uint32(tpm2.TPMPTManufacturer),
+		PropertyCount: 1,
+	}).Execute(dev); err != nil {
+		_ = dev.Close()
 		return nil, fmt.Errorf("device is not a TPM 2.0")
 	}
 
@@ -71,14 +79,14 @@ func tpmAwaitReady() bool {
 // systemd uses to store the SRK reference in LUKS2 token JSON (tpm2_srk field).
 // Layout: magic[4] version[2] handle[4] ... Falls back to 0x81000001, which is
 // systemd's standard persistent SRK handle, on any parse failure.
-func extractSRKHandle(srk []byte) tpmutil.Handle {
+func extractSRKHandle(srk []byte) tpm2.TPMHandle {
 	const iesysMagic = 0x69657379
 	if len(srk) >= 10 && binary.BigEndian.Uint32(srk[0:4]) == iesysMagic {
 		if h := binary.BigEndian.Uint32(srk[6:10]); h != 0 {
-			return tpmutil.Handle(h)
+			return tpm2.TPMHandle(h)
 		}
 	}
-	return tpmutil.Handle(0x81000001)
+	return tpm2.TPMHandle(0x81000001)
 }
 
 // tpm2PINAuthValue derives the TPM2 authValue from a PIN, matching systemd's convention.
@@ -243,7 +251,7 @@ func tpm2PolicySatisfiable(pcrs []int, bankName string, expectedDigest []byte, u
 	}
 	defer dev.Close()
 
-	_, cleanup, err := literalPolicySession(transport.FromReadWriteCloser(dev), pcrs, pcrBankAlgID(bankName), expectedDigest, nil, usePIN)
+	_, cleanup, err := literalPolicySession(dev, pcrs, pcrBankAlgID(bankName), expectedDigest, nil, usePIN)
 	if err != nil {
 		return err
 	}
@@ -259,7 +267,7 @@ func tpm2Unseal(public, private []byte, pcrs []int, bankName string, policyHash,
 		return nil, err
 	}
 	defer dev.Close()
-	t := transport.FromReadWriteCloser(dev)
+	t := dev
 
 	srk, flush, err := loadUnsealSRK(t, srkHandle)
 	if err != nil {
@@ -425,8 +433,7 @@ func measureVolumeKeyToPCR15(k volumeKeyHMACer, volumeName, luksUUID string) err
 	}
 	defer dev.Close()
 
-	t := transport.FromReadWriteCloser(dev)
-	banks, err := activePCRBanks(t)
+	banks, err := activePCRBanks(dev)
 	if err != nil {
 		return fmt.Errorf("reading active PCR banks: %v", err)
 	}
@@ -445,7 +452,7 @@ func measureVolumeKeyToPCR15(k volumeKeyHMACer, volumeName, luksUUID string) err
 		if err != nil {
 			return fmt.Errorf("computing PCR%d measurement for bank %v: %v", pcrSystemIdentity, bank, err)
 		}
-		if err := extendPCR(t, pcrSystemIdentity, bank, digest); err != nil {
+		if err := extendPCR(dev, pcrSystemIdentity, bank, digest); err != nil {
 			return fmt.Errorf("extending PCR%d in bank %v: %v", pcrSystemIdentity, bank, err)
 		}
 	}
@@ -466,8 +473,7 @@ func measurePhaseToPCR11(word string) error {
 	}
 	defer dev.Close()
 
-	t := transport.FromReadWriteCloser(dev)
-	banks, err := activePCRBanks(t)
+	banks, err := activePCRBanks(dev)
 	if err != nil {
 		return fmt.Errorf("reading active PCR banks: %v", err)
 	}
@@ -482,7 +488,7 @@ func measurePhaseToPCR11(word string) error {
 		}
 		hh := h.New()
 		hh.Write([]byte(word))
-		if err := extendPCR(t, pcrKernelBoot, bank, hh.Sum(nil)); err != nil {
+		if err := extendPCR(dev, pcrKernelBoot, bank, hh.Sum(nil)); err != nil {
 			return fmt.Errorf("extending PCR%d in bank %v: %v", pcrKernelBoot, bank, err)
 		}
 	}
