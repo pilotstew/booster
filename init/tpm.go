@@ -163,27 +163,59 @@ var unsealSRKTemplate = tpm2.TPMTPublic{
 	}),
 }
 
+// unsealSRK is the storage parent a sealed blob loads under, carried with its
+// public area because salting a session needs the key, not just its handle.
+type unsealSRK struct {
+	tpm2.NamedHandle
+	Public tpm2.TPMTPublic
+}
+
+// saltedAndEncrypted protects a session on the wire: the session key is derived
+// from a seed encrypted to the SRK, and the response parameter is AES-encrypted.
+// Without the salt an eavesdropper on a discrete TPM's bus sees the unsealed key,
+// and can grind a PIN offline against the session HMAC.
+func (srk unsealSRK) saltedAndEncrypted() []tpm2.AuthOption {
+	return []tpm2.AuthOption{
+		tpm2.Salted(srk.Handle, srk.Public),
+		tpm2.AESEncryption(128, tpm2.EncryptOut),
+	}
+}
+
 // loadUnsealSRK resolves the storage parent of a sealed blob: the persistent SRK
 // named by the token (systemd v252+), or the transient primary above. The returned
 // cleanup flushes the transient one.
-func loadUnsealSRK(t transport.TPM, srkHandle uint32) (tpm2.NamedHandle, func(), error) {
+func loadUnsealSRK(t transport.TPM, srkHandle uint32) (unsealSRK, func(), error) {
 	noop := func() {}
 	if srkHandle != 0 {
 		// Persistent handle: never flushed, that would evict it from the TPM.
 		rp, err := (&tpm2.ReadPublic{ObjectHandle: tpm2.TPMHandle(srkHandle)}).Execute(t)
 		if err != nil {
-			return tpm2.NamedHandle{}, noop, fmt.Errorf("reading SRK %#x: %w", srkHandle, err)
+			return unsealSRK{}, noop, fmt.Errorf("reading SRK %#x: %w", srkHandle, err)
 		}
-		return tpm2.NamedHandle{Handle: tpm2.TPMHandle(srkHandle), Name: rp.Name}, noop, nil
+		pub, err := rp.OutPublic.Contents()
+		if err != nil {
+			return unsealSRK{}, noop, fmt.Errorf("reading SRK %#x public area: %w", srkHandle, err)
+		}
+		return unsealSRK{
+			NamedHandle: tpm2.NamedHandle{Handle: tpm2.TPMHandle(srkHandle), Name: rp.Name},
+			Public:      *pub,
+		}, noop, nil
 	}
 	cp, err := (&tpm2.CreatePrimary{
 		PrimaryHandle: tpm2.TPMRHOwner,
 		InPublic:      tpm2.New2B(unsealSRKTemplate),
 	}).Execute(t)
 	if err != nil {
-		return tpm2.NamedHandle{}, noop, fmt.Errorf("creating SRK: %w", err)
+		return unsealSRK{}, noop, fmt.Errorf("creating SRK: %w", err)
 	}
-	return tpm2.NamedHandle{Handle: cp.ObjectHandle, Name: cp.Name},
+	pub, err := cp.OutPublic.Contents()
+	if err != nil {
+		return unsealSRK{}, noop, fmt.Errorf("reading created SRK public area: %w", err)
+	}
+	return unsealSRK{
+			NamedHandle: tpm2.NamedHandle{Handle: cp.ObjectHandle, Name: cp.Name},
+			Public:      *pub,
+		},
 		func() { _, _ = (&tpm2.FlushContext{FlushHandle: cp.ObjectHandle}).Execute(t) }, nil
 }
 
@@ -192,13 +224,15 @@ func loadUnsealSRK(t transport.TPM, srkHandle uint32) (tpm2.NamedHandle, func(),
 // digest only matches when that order is reproduced exactly. It never depends on
 // the PIN's value, since PolicyAuthValue contributes a fixed constant, which is
 // what lets callers test satisfiability before prompting.
-func literalPolicySession(t transport.TPM, pcrs []int, bank tpm2.TPMAlgID, expectedDigest []byte, pin []byte, usePIN bool) (tpm2.Session, func() error, error) {
-	// unbound, unsalted, unencrypted: go-tpm leaves symmetric, bind and salt null,
-	// so this assumes a trusted bus. The auth value is HMAC'd rather than sent, but
-	// the unsealed key crosses a discrete TPM's bus in the clear.
+// srk is nil when the caller only tests satisfiability: nothing secret crosses
+// the bus there, and salting would cost an SRK load before the PIN prompt.
+func literalPolicySession(t transport.TPM, srk *unsealSRK, pcrs []int, bank tpm2.TPMAlgID, expectedDigest []byte, pin []byte, usePIN bool) (tpm2.Session, func() error, error) {
 	var opts []tpm2.AuthOption
 	if len(pin) > 0 {
 		opts = append(opts, tpm2.Auth(pin))
+	}
+	if srk != nil {
+		opts = append(opts, srk.saltedAndEncrypted()...)
 	}
 	sess, cleanup, err := tpm2.PolicySession(t, tpm2.TPMAlgSHA256, 16, opts...)
 	if err != nil {
@@ -251,7 +285,7 @@ func tpm2PolicySatisfiable(pcrs []int, bankName string, expectedDigest []byte, u
 	}
 	defer dev.Close()
 
-	_, cleanup, err := literalPolicySession(dev, pcrs, pcrBankAlgID(bankName), expectedDigest, nil, usePIN)
+	_, cleanup, err := literalPolicySession(dev, nil, pcrs, pcrBankAlgID(bankName), expectedDigest, nil, usePIN)
 	if err != nil {
 		return err
 	}
@@ -289,7 +323,7 @@ func tpm2Unseal(public, private []byte, pcrs []int, bankName string, policyHash,
 	}
 	defer func() { _, _ = (&tpm2.FlushContext{FlushHandle: loadRsp.ObjectHandle}).Execute(t) }()
 
-	sess, cleanup, err := literalPolicySession(t, pcrs, pcrBankAlgID(bankName), policyHash, pin, len(pin) > 0)
+	sess, cleanup, err := literalPolicySession(t, &srk, pcrs, pcrBankAlgID(bankName), policyHash, pin, len(pin) > 0)
 	if err != nil {
 		return nil, err
 	}

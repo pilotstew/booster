@@ -208,6 +208,22 @@ func TestRSAPublicArea(t *testing.T) {
 // expect back.
 const signedTestSecret = "super-secret-volume-key-0123456"
 
+// recordingTPM keeps every command and response byte that crossed the transport,
+// standing in for a logic analyser on a discrete TPM's bus.
+type recordingTPM struct {
+	inner   transport.TPM
+	traffic []byte
+}
+
+func (r *recordingTPM) Send(cmd []byte) ([]byte, error) {
+	rsp, err := r.inner.Send(cmd)
+	r.traffic = append(r.traffic, cmd...)
+	r.traffic = append(r.traffic, rsp...)
+	return rsp, err
+}
+
+func (r *recordingTPM) reset() { r.traffic = nil }
+
 // signedRig is the shared swtpm fixture for the signed-policy unseal tests: a TPM
 // connection, a transient SRK, and an external RSA signing key standing in for the
 // user's --tpm2-public-key. The key's Name (exponent 0x10001, the first form
@@ -216,7 +232,8 @@ const signedTestSecret = "super-secret-volume-key-0123456"
 type signedRig struct {
 	t       *testing.T
 	tpm     transport.TPM
-	srk     tpm2.NamedHandle
+	bus     *recordingTPM
+	srk     unsealSRK
 	priv    *rsa.PrivateKey
 	keyName tpm2.TPM2BName
 }
@@ -229,11 +246,14 @@ func newSignedRig(t *testing.T) *signedRig {
 	dev, err := openTPM()
 	require.NoError(t, err)
 	t.Cleanup(func() { dev.Close() })
-	thetpm := dev
+	bus := &recordingTPM{inner: dev}
+	thetpm := transport.TPM(bus)
 
 	srkRsp, err := (&tpm2.CreatePrimary{PrimaryHandle: tpm2.TPMRHOwner, InPublic: tpm2.New2B(tpm2.ECCSRKTemplate)}).Execute(thetpm)
 	require.NoError(t, err)
 	t.Cleanup(func() { flushHandle(thetpm, srkRsp.ObjectHandle) })
+	srkPub, err := srkRsp.OutPublic.Contents()
+	require.NoError(t, err)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -244,7 +264,8 @@ func newSignedRig(t *testing.T) *signedRig {
 	return &signedRig{
 		t:       t,
 		tpm:     thetpm,
-		srk:     tpm2.NamedHandle{Handle: srkRsp.ObjectHandle, Name: srkRsp.Name},
+		bus:     bus,
+		srk:     unsealSRK{NamedHandle: tpm2.NamedHandle{Handle: srkRsp.ObjectHandle, Name: srkRsp.Name}, Public: *srkPub},
 		priv:    key,
 		keyName: le.Name,
 	}
@@ -273,7 +294,7 @@ func (r *signedRig) seal(authPolicy, pin []byte) (tpm2.TPM2BPublic, tpm2.TPM2BPr
 		sens.UserAuth = tpm2.TPM2BAuth{Buffer: pin}
 	}
 	rsp, err := (&tpm2.Create{
-		ParentHandle: r.srk,
+		ParentHandle: r.srk.NamedHandle,
 		InSensitive:  tpm2.TPM2BSensitiveCreate{Sensitive: sens},
 		InPublic: tpm2.New2B(tpm2.TPMTPublic{
 			Type: tpm2.TPMAlgKeyedHash, NameAlg: tpm2.TPMAlgSHA256,
@@ -313,6 +334,32 @@ func (r *signedRig) signPolicy(approved []byte) []byte {
 func (r *signedRig) sigJSON(pcr int, approved, sig []byte) []byte {
 	return []byte(fmt.Sprintf(`{"sha256":[{"pcrs":[%d],"pkfp":"%s","pol":"%s","sig":"%s"}]}`,
 		pcr, rsaPublicKeyFingerprint(r.pub()), hex.EncodeToString(approved), base64.StdEncoding.EncodeToString(sig)))
+}
+
+// TestSignedUnsealKeepsSecretOffTheBus pins what a salted, parameter-encrypted
+// session buys: the unsealed secret must not appear in the bytes crossing the
+// transport. On a discrete TPM those bytes are a physical bus anyone with a
+// clip can read, so an unencrypted response hands over the volume key even
+// though the policy and PIN did their jobs. Sealing traffic is excluded on
+// purpose: enrolment sends the secret to the TPM in the clear, which is
+// systemd-cryptenroll's problem and not booster's to fix at unlock time.
+func TestSignedUnsealKeepsSecretOffTheBus(t *testing.T) {
+	r := newSignedRig(t)
+	pub, priv := r.seal(r.authorizePolicy(), nil)
+
+	const debugPCR = 16
+	pubkeyPCRs := []int{debugPCR}
+	pol := r.policyPCRDigest(debugPCR)
+	sig := r.sigJSON(debugPCR, pol, r.signPolicy(pol))
+
+	r.bus.reset()
+	out, err := signedTPM2Unseal(r.tpm, r.srk, pub, priv, r.pub(), pubkeyPCRs, nil, "sha256", sig, nil)
+	require.NoError(t, err)
+	require.Equal(t, []byte(signedTestSecret), out)
+
+	require.NotEmpty(t, r.bus.traffic, "the recorder must have seen the unseal")
+	require.NotContains(t, string(r.bus.traffic), signedTestSecret,
+		"the unsealed secret crossed the bus in the clear")
 }
 
 // TestSignedUnsealSurvivesPCRChange is the headline proof: a blob whose authPolicy

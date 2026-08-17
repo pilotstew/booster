@@ -189,7 +189,7 @@ func flushHandle(t transport.TPM, h tpm2.TPMHandle) {
 // token also binds (tpm2-pcrs, e.g. 7 or the 15 latch): systemd composes them as
 // a PolicyPCR after the PolicyAuthorize, so the volume key can bind both a signed
 // PCR 11 and literal PCRs in one token.
-func signedTPM2Unseal(t transport.TPM, srk tpm2.NamedHandle, public tpm2.TPM2BPublic, private tpm2.TPM2BPrivate, verifyKey *rsa.PublicKey, pubkeyPCRs, literalPCRs []int, bankName string, sigJSON []byte, pin []byte) ([]byte, error) {
+func signedTPM2Unseal(t transport.TPM, srk unsealSRK, public tpm2.TPM2BPublic, private tpm2.TPM2BPrivate, verifyKey *rsa.PublicKey, pubkeyPCRs, literalPCRs []int, bankName string, sigJSON []byte, pin []byte) ([]byte, error) {
 	if bankName == "" {
 		return nil, fmt.Errorf("systemd-tpm2 token has no PCR bank")
 	}
@@ -198,7 +198,7 @@ func signedTPM2Unseal(t transport.TPM, srk tpm2.NamedHandle, public tpm2.TPM2BPu
 		return nil, err
 	}
 
-	loadRsp, err := (&tpm2.Load{ParentHandle: srk, InPrivate: private, InPublic: public}).Execute(t)
+	loadRsp, err := (&tpm2.Load{ParentHandle: srk.NamedHandle, InPrivate: private, InPublic: public}).Execute(t)
 	if err != nil {
 		return nil, classifyTPMFailure("loading sealed object", err)
 	}
@@ -209,7 +209,7 @@ func signedTPM2Unseal(t transport.TPM, srk tpm2.NamedHandle, public tpm2.TPM2BPu
 	// feeds the key Name that PolicyAuthorize checks, so try 0x10001 then 0.
 	var lastErr error
 	for _, exp := range []uint32{0x10001, 0} {
-		out, err := signedUnsealAttempt(t, obj, sigs, bankName, verifyKey, exp, pubkeyPCRs, literalPCRs, pin)
+		out, err := signedUnsealAttempt(t, srk, obj, sigs, bankName, verifyKey, exp, pubkeyPCRs, literalPCRs, pin)
 		if err == nil {
 			return out, nil
 		}
@@ -224,13 +224,14 @@ func signedTPM2Unseal(t transport.TPM, srk tpm2.NamedHandle, public tpm2.TPM2BPu
 	return nil, lastErr
 }
 
-func signedUnsealAttempt(t transport.TPM, obj tpm2.NamedHandle, sigs map[string][]pcrSignature, bankName string, verifyKey *rsa.PublicKey, exp uint32, pubkeyPCRs, literalPCRs []int, pin []byte) ([]byte, error) {
+func signedUnsealAttempt(t transport.TPM, srk unsealSRK, obj tpm2.NamedHandle, sigs map[string][]pcrSignature, bankName string, verifyKey *rsa.PublicKey, exp uint32, pubkeyPCRs, literalPCRs []int, pin []byte) ([]byte, error) {
 	// With a PIN, the session carries the object's auth value so the trailing
 	// PolicyAuthValue (composed after PolicyAuthorize, matching systemd) is satisfied.
 	var sessOpts []tpm2.AuthOption
 	if len(pin) > 0 {
 		sessOpts = append(sessOpts, tpm2.Auth(pin))
 	}
+	sessOpts = append(sessOpts, srk.saltedAndEncrypted()...)
 	sess, cleanup, err := tpm2.PolicySession(t, tpm2.TPMAlgSHA256, 16, sessOpts...)
 	if err != nil {
 		return nil, err
