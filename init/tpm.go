@@ -23,12 +23,17 @@ import (
 
 var enableSwEmulator bool
 
+// swEmulatorAddr is where the emulator path dials. swtpm's default port, and a
+// variable so tests can run their own instance on a free one instead of racing
+// for a fixed port.
+var swEmulatorAddr = ":2321"
+
 func openTPM() (io.ReadWriteCloser, error) {
 	var dev io.ReadWriteCloser
 	var err error
 
 	if enableSwEmulator {
-		dev, err = net.Dial("tcp", ":2321") // swtpm emulator is listening at port 2321
+		dev, err = net.Dial("tcp", swEmulatorAddr)
 	} else {
 		dev, err = legacytpm2.OpenTPM("/dev/tpmrm0")
 	}

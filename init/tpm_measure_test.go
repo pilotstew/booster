@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"net"
 	"os/exec"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -16,31 +17,76 @@ import (
 )
 
 // startSwtpmTCPForTest starts swtpm in TCP server mode so booster's
-// enableSwEmulator path (which dials :2321) talks to it. Skips when swtpm is
+// enableSwEmulator path talks to it on a port picked for this test. Skips when swtpm is
 // unavailable; the process is killed on test cleanup.
+// freeSwtpmPorts returns n, n+1 with both free: swtpm needs a data port and a
+// control port, and the pair mirrors what the integration suite does rather than
+// competing for a fixed one, which a swtpm outliving its test would hold.
+func freeSwtpmPorts(t *testing.T) (int, int) {
+	t.Helper()
+
+	for attempt := 0; attempt < 20; attempt++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		data := ln.Addr().(*net.TCPAddr).Port
+		require.NoError(t, ln.Close())
+
+		next, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(data+1))
+		if err != nil {
+			continue // neighbour taken, try another
+		}
+		require.NoError(t, next.Close())
+		return data, data + 1
+	}
+	require.Fail(t, "no consecutive free port pair found")
+	return 0, 0
+}
+
+// pointAtNoTPM aims the emulator path at a port nothing is listening on, so a
+// test that wants "no TPM reachable" gets it whatever else is running on this
+// machine. Assuming the default port is closed made these tests pass or fail on
+// whether some other swtpm happened to be up.
+func pointAtNoTPM(t *testing.T) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	prev := swEmulatorAddr
+	swEmulatorAddr = addr
+	t.Cleanup(func() { swEmulatorAddr = prev })
+}
+
 func startSwtpmTCPForTest(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("swtpm"); err != nil {
 		t.Skip("swtpm not installed")
 	}
+	data, ctrl := freeSwtpmPorts(t)
 	dir := t.TempDir()
 	cmd := exec.Command("swtpm", "socket", "--tpm2",
-		"--server", "type=tcp,port=2321",
-		"--ctrl", "type=tcp,port=2322",
+		"--server", "type=tcp,port="+strconv.Itoa(data),
+		"--ctrl", "type=tcp,port="+strconv.Itoa(ctrl),
 		"--tpmstate", "dir="+dir,
 		"--flags", "not-need-init,startup-clear")
 	require.NoError(t, cmd.Start())
-	// Kill AND reap so the fixed :2321 port is released before the next
-	// swtpm-binding test starts (booster's emulator path hardcodes :2321, so
-	// these tests can't use random ports and must serialize cleanly).
+	// Reap as well as kill, so a finished test leaves no swtpm behind holding a
+	// port or a TPM state directory.
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
 
+	addr := "127.0.0.1:" + strconv.Itoa(data)
+	prev := swEmulatorAddr
+	swEmulatorAddr = addr
+	t.Cleanup(func() { swEmulatorAddr = prev })
+
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:2321", 200*time.Millisecond)
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
 			_ = c.Close()
 			return
@@ -104,9 +150,10 @@ func TestMeasurePhaseToPCR11(t *testing.T) {
 // TestMeasurePhaseToPCR11FailsClosedWhenTPMUnavailable pins the fail-safe
 // contract: if the phase barrier cannot be applied, the extend must error so the
 // caller aborts rather than unsealing against an un-barriered PCR11. Here the TPM
-// is unreachable (emulator dial to :2321 with no swtpm running).
+// is unreachable (emulator dial with no swtpm running).
 func TestMeasurePhaseToPCR11FailsClosedWhenTPMUnavailable(t *testing.T) {
 	enableSwEmulator = true
+	pointAtNoTPM(t)
 	t.Cleanup(func() { enableSwEmulator = false })
 
 	require.Error(t, measurePhaseToPCR11(phaseEnterInitrd),
@@ -221,11 +268,12 @@ func TestApplyBootPhaseForwardLockIdempotentAfterEarlyEnter(t *testing.T) {
 }
 
 // TestApplyBootPhaseForwardLockBestEffortNoTPM pins the no-brick invariant: with
-// no reachable TPM (emulator dial to :2321 with no swtpm), the forward-lock must
+// no reachable TPM (emulator dial with no swtpm), the forward-lock must
 // return without error or panic so a TPM-less / passphrase-only boot still hands
 // off to the real init. Contrast with the fail-closed PCR15 latch, which aborts.
 func TestApplyBootPhaseForwardLockBestEffortNoTPM(t *testing.T) {
-	enableSwEmulator = true // openTPM dials :2321; no swtpm is started
+	enableSwEmulator = true
+	pointAtNoTPM(t)
 	t.Cleanup(func() { enableSwEmulator = false })
 	resetEnterInitrdBarrier()
 	t.Cleanup(resetEnterInitrdBarrier)
@@ -298,9 +346,10 @@ func TestHashForPCRBankUnsupported(t *testing.T) {
 // contract (systemd #36705): if the PCR15 latch can't be applied, the measure
 // must return an error so the caller aborts the unlock rather than booting with
 // the re-unseal oracle left open. Here the TPM is unreachable (emulator dial to
-// :2321 with no swtpm running), standing in for any extend failure.
+// no swtpm running), standing in for any extend failure.
 func TestMeasureVolumeKeyToPCR15FailsClosedWhenTPMUnavailable(t *testing.T) {
-	enableSwEmulator = true // openTPM dials :2321; no swtpm is started
+	enableSwEmulator = true
+	pointAtNoTPM(t)
 	t.Cleanup(func() { enableSwEmulator = false })
 
 	err := measureVolumeKeyToPCR15(rawKeyHMACer([]byte("k")), "cryptroot", "uuid")
