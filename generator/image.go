@@ -121,6 +121,9 @@ func (img *Image) AppendDirEntry(dir string) error {
 	return err
 }
 
+// moduleSignatureMarker terminates a module signature, which sits past the end of the ELF (kernel scripts/sign-file.c)
+var moduleSignatureMarker = []byte("~Module signature appended~\n")
+
 func stripElf(in []byte, stripAll bool) ([]byte, error) {
 	t, err := os.CreateTemp("", "booster.strip")
 	if err != nil {
@@ -183,14 +186,19 @@ func (img *Image) AppendContent(dest string, osMode os.FileMode, content []byte)
 				// some firmware files are actually ELF but we should not run strip on them
 				doStrip = false
 			}
+			if doStrip && bytes.HasSuffix(content, moduleSignatureMarker) {
+				// strip rewrites the ELF, discarding everything past it, and reports success
+				debug("%s is signed, skipping strip to keep the signature", dest)
+				doStrip = false
+			}
 			if doStrip {
 				// do not use --strip-all for modules/shared libs as it fails to load
 				isBinary := ef.Type == elf.ET_EXEC
 				stripped, stripErr := stripElf(content, isBinary)
 				if stripErr != nil {
 					// Strip is an optional size optimisation; a failure (e.g. LTO
-					// modules, signed modules, unusual toolchains) must not abort
-					// the build.  Warn and fall back to the unstripped binary.
+					// modules, unusual toolchains) must not abort the build.
+					// Warn and fall back to the unstripped binary.
 					warning("strip %s: %v — using unstripped", dest, stripErr)
 				} else {
 					content = stripped

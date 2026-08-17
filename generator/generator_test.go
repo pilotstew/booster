@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,6 +50,7 @@ type options struct {
 	universal                    bool
 	extraModules                 []string // modules to add to the image
 	prepareModulesAt             []string // copy a test module to these locations
+	signModulesAt                []string // same, with a module signature appended
 	unpackImage                  bool
 	hostModules                  []string // modules as found under /proc/modules
 	hostAliases                  []string // list of all aliases for the host devices
@@ -136,6 +138,15 @@ func createTestInitRamfs(t *testing.T, o *options) {
 			source += ".gz"
 		}
 		require.NoError(t, exec.Command("cp", source, loc).Run())
+	}
+
+	for _, l := range o.signModulesAt {
+		loc := modulesDir + "/" + l
+		require.NoError(t, os.MkdirAll(filepath.Dir(loc), 0o755))
+
+		content, err := os.ReadFile("assets/test_module.ko")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(loc, appendModuleSignature(content), 0o644))
 	}
 
 	require.NoError(t, os.WriteFile(modulesDir+"/modules.builtin", generateBuiltinFile(o.builtin), 0o644))
@@ -514,6 +525,46 @@ func TestStripBinaries(t *testing.T) {
 	checkFileExistence(t, opts.workDir+"/image.unpacked/usr/lib/firmware/whiteheat.fw.zst")
 	checkFileExistence(t, opts.workDir+"/image.unpacked/usr/lib/firmware/usbdux_firmware.bin.zst")
 	checkFileExistence(t, opts.workDir+"/image.unpacked/usr/lib/firmware/rtw88/rtw8723d_fw.bin.zst")
+}
+
+// Shaped like a real signature (signature, 12 byte descriptor, marker) per the
+// kernel's scripts/sign-file.c, though only the marker matters to the generator.
+func appendModuleSignature(content []byte) []byte {
+	sig := bytes.Repeat([]byte{0xab}, 64)
+	descriptor := make([]byte, 12)
+	binary.BigEndian.PutUint32(descriptor[8:], uint32(len(sig)))
+
+	out := append([]byte{}, content...)
+	out = append(out, sig...)
+	out = append(out, descriptor...)
+
+	return append(out, "~Module signature appended~\n"...)
+}
+
+func TestStripKeepsModuleSignatures(t *testing.T) {
+	// strip discards everything past the ELF, signature included, so a stripped
+	// module is refused once the kernel enforces signatures
+	opts := options{
+		universal:        true,
+		stripBinaries:    true,
+		prepareModulesAt: []string{"kernel/fs/unsigned.ko"},
+		signModulesAt:    []string{"kernel/fs/signed.ko"},
+		unpackImage:      true,
+	}
+	createTestInitRamfs(t, &opts)
+
+	source, err := os.ReadFile(opts.workDir + "/modules/kernel/fs/signed.ko")
+	require.NoError(t, err)
+	packed, err := os.ReadFile(opts.workDir + "/image.unpacked/usr/lib/modules/signed.ko")
+	require.NoError(t, err)
+	require.Equal(t, source, packed, "signed module must reach the image untouched")
+
+	// the unsigned module is still stripped, so this is not a blanket opt-out
+	unsigned, err := os.ReadFile(opts.workDir + "/image.unpacked/usr/lib/modules/unsigned.ko")
+	require.NoError(t, err)
+	original, err := os.ReadFile("assets/test_module.ko")
+	require.NoError(t, err)
+	require.Less(t, len(unsigned), len(original), "unsigned module should still be stripped")
 }
 
 func TestVirtualConsoleFontMap(t *testing.T) {
