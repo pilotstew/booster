@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/anatol/vmtest"
@@ -179,8 +181,22 @@ func TestGptRootAutodiscoveryNoAuto(t *testing.T) {
 	require.NoError(t, err)
 	defer vm.Kill()
 
-	require.NoError(t, vm.ConsoleExpect("booster: autodiscovery: partition /dev/sda2 has 'do not mount' GPT attribute, skip it"))
-	require.NoError(t, vm.ConsoleExpect("Timeout waiting for root filesystem"))
+	// Nothing sequences these two.  The skip is logged when udev delivers the
+	// partition, the timeout when a wall-clock timer expires, and mountTimeout
+	// is one second, so on a fast host the timer can win.  ConsoleExpect only
+	// moves forward, so a fixed order fails whenever the boot picks the other.
+	const (
+		skipped  = "booster: autodiscovery: partition /dev/sda2 has 'do not mount' GPT attribute, skip it"
+		timedOut = "Timeout waiting for root filesystem"
+	)
+	either := regexp.MustCompile(`(` + regexp.QuoteMeta(skipped) + `|` + regexp.QuoteMeta(timedOut) + `)`)
+	matches, err := vm.ConsoleExpectRE(either)
+	require.NoError(t, err)
+	if strings.Contains(matches[0], "skip it") {
+		require.NoError(t, vm.ConsoleExpect(timedOut))
+	} else {
+		require.NoError(t, vm.ConsoleExpect(skipped))
+	}
 }
 
 func TestGptRootAutodiscoveryReadOnly(t *testing.T) {
