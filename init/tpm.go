@@ -339,35 +339,65 @@ func xescapeColon(s string) string {
 // cryptoHashForPCRBank maps a TPM PCR bank algorithm to its crypto.Hash.
 // ok is false for algorithms booster cannot handle, letting the caller fail
 // closed rather than silently leave that bank's PCR un-extended.
-func cryptoHashForPCRBank(alg legacytpm2.Algorithm) (h crypto.Hash, ok bool) {
+func cryptoHashForPCRBank(alg tpm2.TPMAlgID) (h crypto.Hash, ok bool) {
 	switch alg {
-	case legacytpm2.AlgSHA1:
+	case tpm2.TPMAlgSHA1:
 		return crypto.SHA1, true
-	case legacytpm2.AlgSHA256:
+	case tpm2.TPMAlgSHA256:
 		return crypto.SHA256, true
-	case legacytpm2.AlgSHA384:
+	case tpm2.TPMAlgSHA384:
 		return crypto.SHA384, true
-	case legacytpm2.AlgSHA512:
+	case tpm2.TPMAlgSHA512:
 		return crypto.SHA512, true
 	}
 	return 0, false
 }
 
 // activePCRBanks returns the hash algorithms of the TPM's allocated PCR banks.
-func activePCRBanks(dev io.ReadWriter) ([]legacytpm2.Algorithm, error) {
-	caps, _, err := legacytpm2.GetCapability(dev, legacytpm2.CapabilityPCRs, 64, 0)
+// A bank the TPM reports with an all-zero selection has no PCRs allocated, so it
+// is not a bank booster must extend.
+func activePCRBanks(t transport.TPM) ([]tpm2.TPMAlgID, error) {
+	rsp, err := tpm2.GetCapability{
+		Capability:    tpm2.TPMCapPCRs,
+		PropertyCount: 64,
+	}.Execute(t)
 	if err != nil {
 		return nil, err
 	}
-	var banks []legacytpm2.Algorithm
-	for _, c := range caps {
-		sel, ok := c.(legacytpm2.PCRSelection)
-		if !ok || len(sel.PCRs) == 0 {
-			continue
+	sel, err := rsp.CapabilityData.Data.AssignedPCR()
+	if err != nil {
+		return nil, err
+	}
+
+	var banks []tpm2.TPMAlgID
+	for _, s := range sel.PCRSelections {
+		allocated := false
+		for _, b := range s.PCRSelect {
+			if b != 0 {
+				allocated = true
+				break
+			}
 		}
-		banks = append(banks, sel.Hash)
+		if allocated {
+			banks = append(banks, s.Hash)
+		}
 	}
 	return banks, nil
+}
+
+// extendPCR extends one PCR in one bank. The PCR index is its own auth handle
+// and takes an empty password, which is how systemd extends them too.
+func extendPCR(t transport.TPM, pcr int, bank tpm2.TPMAlgID, digest []byte) error {
+	_, err := tpm2.PCRExtend{
+		PCRHandle: tpm2.AuthHandle{
+			Handle: tpm2.TPMHandle(pcr),
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		Digests: tpm2.TPMLDigestValues{
+			Digests: []tpm2.TPMTHA{{HashAlg: bank, Digest: digest}},
+		},
+	}.Execute(t)
+	return err
 }
 
 // volumeKeyHMACer computes HMAC(volume_key, message) with a caller-named hash
@@ -395,7 +425,8 @@ func measureVolumeKeyToPCR15(k volumeKeyHMACer, volumeName, luksUUID string) err
 	}
 	defer dev.Close()
 
-	banks, err := activePCRBanks(dev)
+	t := transport.FromReadWriteCloser(dev)
+	banks, err := activePCRBanks(t)
 	if err != nil {
 		return fmt.Errorf("reading active PCR banks: %v", err)
 	}
@@ -414,7 +445,7 @@ func measureVolumeKeyToPCR15(k volumeKeyHMACer, volumeName, luksUUID string) err
 		if err != nil {
 			return fmt.Errorf("computing PCR%d measurement for bank %v: %v", pcrSystemIdentity, bank, err)
 		}
-		if err := legacytpm2.PCRExtend(dev, tpmutil.Handle(pcrSystemIdentity), bank, digest, ""); err != nil {
+		if err := extendPCR(t, pcrSystemIdentity, bank, digest); err != nil {
 			return fmt.Errorf("extending PCR%d in bank %v: %v", pcrSystemIdentity, bank, err)
 		}
 	}
@@ -435,7 +466,8 @@ func measurePhaseToPCR11(word string) error {
 	}
 	defer dev.Close()
 
-	banks, err := activePCRBanks(dev)
+	t := transport.FromReadWriteCloser(dev)
+	banks, err := activePCRBanks(t)
 	if err != nil {
 		return fmt.Errorf("reading active PCR banks: %v", err)
 	}
@@ -450,7 +482,7 @@ func measurePhaseToPCR11(word string) error {
 		}
 		hh := h.New()
 		hh.Write([]byte(word))
-		if err := legacytpm2.PCRExtend(dev, tpmutil.Handle(pcrKernelBoot), bank, hh.Sum(nil), ""); err != nil {
+		if err := extendPCR(t, pcrKernelBoot, bank, hh.Sum(nil)); err != nil {
 			return fmt.Errorf("extending PCR%d in bank %v: %v", pcrKernelBoot, bank, err)
 		}
 	}

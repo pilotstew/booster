@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-tpm/legacy/tpm2"
+	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -95,19 +96,26 @@ func startSwtpmTCPForTest(t *testing.T) {
 	}
 }
 
-func readPCR15(t *testing.T, bank tpm2.Algorithm) []byte {
+func readPCR15(t *testing.T, bank tpm2.TPMAlgID) []byte {
 	t.Helper()
 	return readPCRIndex(t, bank, 15)
 }
 
-func readPCRIndex(t *testing.T, bank tpm2.Algorithm, idx int) []byte {
+func readPCRIndex(t *testing.T, bank tpm2.TPMAlgID, idx int) []byte {
 	t.Helper()
 	dev, err := openTPM()
 	require.NoError(t, err)
 	defer dev.Close()
-	pcrs, err := tpm2.ReadPCRs(dev, tpm2.PCRSelection{Hash: bank, PCRs: []int{idx}})
+
+	rsp, err := tpm2.PCRRead{
+		PCRSelectionIn: tpm2.TPMLPCRSelection{PCRSelections: []tpm2.TPMSPCRSelection{{
+			Hash:      bank,
+			PCRSelect: tpm2.PCClientCompatible.PCRs(uint(idx)),
+		}}},
+	}.Execute(transport.FromReadWriteCloser(dev))
 	require.NoError(t, err)
-	return pcrs[idx]
+	require.Len(t, rsp.PCRValues.Digests, 1)
+	return rsp.PCRValues.Digests[0].Buffer
 }
 
 // TestMeasurePhaseToPCR11 pins the boot-phase barrier byte format: booster
@@ -125,8 +133,8 @@ func TestMeasurePhaseToPCR11(t *testing.T) {
 	enableSwEmulator = true
 	t.Cleanup(func() { enableSwEmulator = false })
 
-	require.Equal(t, make([]byte, 32), readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot), "sha256:11 must start zero")
-	require.Equal(t, make([]byte, 20), readPCRIndex(t, tpm2.AlgSHA1, pcrKernelBoot), "sha1:11 must start zero")
+	require.Equal(t, make([]byte, 32), readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot), "sha256:11 must start zero")
+	require.Equal(t, make([]byte, 20), readPCRIndex(t, tpm2.TPMAlgSHA1, pcrKernelBoot), "sha1:11 must start zero")
 
 	require.NoError(t, measurePhaseToPCR11(phaseEnterInitrd))
 
@@ -135,7 +143,7 @@ func TestMeasurePhaseToPCR11(t *testing.T) {
 	e256 := sha256.New()
 	e256.Write(make([]byte, 32))
 	e256.Write(d256[:])
-	require.Equal(t, e256.Sum(nil), readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot),
+	require.Equal(t, e256.Sum(nil), readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot),
 		"sha256 bank must extend PCR11 with the plain SHA256(word), no NUL, no HMAC")
 
 	// sha1 bank: PCR11 = SHA1(zeros20 || SHA1("enter-initrd")) — all active banks.
@@ -143,7 +151,7 @@ func TestMeasurePhaseToPCR11(t *testing.T) {
 	e1 := sha1.New()
 	e1.Write(make([]byte, 20))
 	e1.Write(d1[:])
-	require.Equal(t, e1.Sum(nil), readPCRIndex(t, tpm2.AlgSHA1, pcrKernelBoot),
+	require.Equal(t, e1.Sum(nil), readPCRIndex(t, tpm2.TPMAlgSHA1, pcrKernelBoot),
 		"sha1 bank must be extended too (a policy satisfiable via an un-extended bank is bypassable)")
 }
 
@@ -187,12 +195,12 @@ func TestEnsureEnterInitrdBarrierOnce(t *testing.T) {
 	e.Write(make([]byte, 32))
 	e.Write(d[:])
 	want := e.Sum(nil)
-	require.Equal(t, want, readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot), "first call extends enter-initrd")
+	require.Equal(t, want, readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot), "first call extends enter-initrd")
 
 	// Repeated calls must NOT extend again — PCR11 stays put.
 	require.NoError(t, ensureEnterInitrdBarrier())
 	require.NoError(t, ensureEnterInitrdBarrier())
-	require.Equal(t, want, readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot), "barrier must extend exactly once per boot")
+	require.Equal(t, want, readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot), "barrier must extend exactly once per boot")
 }
 
 // TestApplyBootPhaseForwardLockUnconditional pins the boot-phase alignment with
@@ -208,7 +216,7 @@ func TestApplyBootPhaseForwardLockUnconditional(t *testing.T) {
 	t.Cleanup(resetEnterInitrdBarrier)
 
 	// PCR11 starts at all-zeros in fresh swtpm (no token was processed).
-	require.Equal(t, make([]byte, 32), readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot), "sha256:11 must start zero")
+	require.Equal(t, make([]byte, 32), readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot), "sha256:11 must start zero")
 
 	applyBootPhaseForwardLock()
 
@@ -225,7 +233,7 @@ func TestApplyBootPhaseForwardLockUnconditional(t *testing.T) {
 	l.Write(leaveExt[:])
 	want := l.Sum(nil)
 
-	require.Equal(t, want, readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot),
+	require.Equal(t, want, readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot),
 		"forward-lock must walk PCR11 enter-initrd -> leave-initrd even with no token processed")
 	require.True(t, enterInitrdApplied, "enter-initrd must be recorded as applied")
 }
@@ -252,7 +260,7 @@ func TestApplyBootPhaseForwardLockIdempotentAfterEarlyEnter(t *testing.T) {
 	e.Write(make([]byte, 32))
 	e.Write(enterExt[:])
 	afterEnter := e.Sum(nil)
-	require.Equal(t, afterEnter, readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot), "early enter-initrd value")
+	require.Equal(t, afterEnter, readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot), "early enter-initrd value")
 
 	// switch_root forward-lock: must add only leave-initrd, not a second enter.
 	applyBootPhaseForwardLock()
@@ -263,7 +271,7 @@ func TestApplyBootPhaseForwardLockIdempotentAfterEarlyEnter(t *testing.T) {
 	l.Write(leaveExt[:])
 	want := l.Sum(nil)
 
-	require.Equal(t, want, readPCRIndex(t, tpm2.AlgSHA256, pcrKernelBoot),
+	require.Equal(t, want, readPCRIndex(t, tpm2.TPMAlgSHA256, pcrKernelBoot),
 		"forward-lock after an early enter-initrd must apply leave-initrd only (no double enter-initrd)")
 }
 
@@ -311,7 +319,7 @@ func TestMeasureVolumeKeyToPCR15ExtendsSHA256(t *testing.T) {
 	const uuid = "5cbc48ce-0e78-4c6b-ac90-a8a540514b90"
 	volumeKey := []byte("0123456789abcdef0123456789abcdef")
 
-	before := readPCR15(t, tpm2.AlgSHA256)
+	before := readPCR15(t, tpm2.TPMAlgSHA256)
 	require.Equal(t, make([]byte, 32), before, "PCR15 must start uninitialized (all zeros)")
 
 	require.NoError(t, measureVolumeKeyToPCR15(rawKeyHMACer(volumeKey), name, uuid))
@@ -324,7 +332,7 @@ func TestMeasureVolumeKeyToPCR15ExtendsSHA256(t *testing.T) {
 	h.Write(digest)
 	want := h.Sum(nil)
 
-	after := readPCR15(t, tpm2.AlgSHA256)
+	after := readPCR15(t, tpm2.TPMAlgSHA256)
 	require.Equal(t, want, after,
 		"PCR15 must equal the systemd-compatible HMAC(volume_key, \"cryptsetup:\"+name+\":\"+uuid) extend")
 }
@@ -334,11 +342,11 @@ func TestMeasureVolumeKeyToPCR15ExtendsSHA256(t *testing.T) {
 // aborts rather than silently leaving that bank's PCR15 un-extended (which would
 // leave a satisfiable-via-that-bank policy bypassable).
 func TestHashForPCRBankUnsupported(t *testing.T) {
-	for _, alg := range []tpm2.Algorithm{tpm2.AlgSHA1, tpm2.AlgSHA256, tpm2.AlgSHA384, tpm2.AlgSHA512} {
+	for _, alg := range []tpm2.TPMAlgID{tpm2.TPMAlgSHA1, tpm2.TPMAlgSHA256, tpm2.TPMAlgSHA384, tpm2.TPMAlgSHA512} {
 		_, ok := cryptoHashForPCRBank(alg)
 		require.True(t, ok, "bank %v must be supported", alg)
 	}
-	_, ok := cryptoHashForPCRBank(tpm2.AlgNull)
+	_, ok := cryptoHashForPCRBank(tpm2.TPMAlgNull)
 	require.False(t, ok, "unknown bank must report unsupported (fail closed)")
 }
 
@@ -371,8 +379,8 @@ func TestMeasureVolumeKeyToPCR15ExtendsAllActiveBanks(t *testing.T) {
 	volumeKey := []byte("0123456789abcdef0123456789abcdef")
 	data := []byte("cryptsetup:" + name + ":" + uuid)
 
-	require.Equal(t, make([]byte, 32), readPCR15(t, tpm2.AlgSHA256), "sha256:15 must start zero")
-	require.Equal(t, make([]byte, 20), readPCR15(t, tpm2.AlgSHA1), "sha1:15 must start zero")
+	require.Equal(t, make([]byte, 32), readPCR15(t, tpm2.TPMAlgSHA256), "sha256:15 must start zero")
+	require.Equal(t, make([]byte, 20), readPCR15(t, tpm2.TPMAlgSHA1), "sha1:15 must start zero")
 
 	require.NoError(t, measureVolumeKeyToPCR15(rawKeyHMACer(volumeKey), name, uuid))
 
@@ -382,7 +390,7 @@ func TestMeasureVolumeKeyToPCR15ExtendsAllActiveBanks(t *testing.T) {
 	e256 := sha256.New()
 	e256.Write(make([]byte, 32))
 	e256.Write(m256.Sum(nil))
-	require.Equal(t, e256.Sum(nil), readPCR15(t, tpm2.AlgSHA256), "sha256 bank must be extended with HMAC-SHA256")
+	require.Equal(t, e256.Sum(nil), readPCR15(t, tpm2.TPMAlgSHA256), "sha256 bank must be extended with HMAC-SHA256")
 
 	// sha1 bank: PCR15 = SHA1(zeros20 || HMAC-SHA1(key, data))
 	m1 := hmac.New(sha1.New, volumeKey)
@@ -390,7 +398,7 @@ func TestMeasureVolumeKeyToPCR15ExtendsAllActiveBanks(t *testing.T) {
 	e1 := sha1.New()
 	e1.Write(make([]byte, 20))
 	e1.Write(m1.Sum(nil))
-	require.Equal(t, e1.Sum(nil), readPCR15(t, tpm2.AlgSHA1), "sha1 bank must be extended with HMAC-SHA1 (all active banks)")
+	require.Equal(t, e1.Sum(nil), readPCR15(t, tpm2.TPMAlgSHA1), "sha1 bank must be extended with HMAC-SHA1 (all active banks)")
 }
 
 // TestXescapeColon pins booster's reimplementation of systemd's
