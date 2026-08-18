@@ -123,6 +123,7 @@ func generateInitRamfs(conf *generatorConfig) error {
 		return err
 	}
 	defer img.Cleanup()
+	img.signedModulesRequired = kernelEnforcesModuleSignatures(conf.modulesDir, conf.kernelVersion)
 
 	if err := appendCompatibilitySymlinks(img); err != nil {
 		return err

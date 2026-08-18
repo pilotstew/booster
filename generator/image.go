@@ -26,6 +26,8 @@ type Image struct {
 	out           *cpio.Writer
 	contains      set // whether image contains the file
 	stripBinaries bool
+
+	signedModulesRequired bool
 }
 
 func NewImage(path string, compression string, stripBinaries bool) (*Image, error) {
@@ -121,7 +123,10 @@ func (img *Image) AppendDirEntry(dir string) error {
 	return err
 }
 
-// moduleSignatureMarker terminates a module signature, which sits past the end of the ELF (kernel scripts/sign-file.c)
+// moduleSignatureMarker terminates a module signature, which sits past the end
+// of the ELF (kernel scripts/sign-file.c). Whether losing it is fatal is decided
+// at boot, not here, and two of the three enforcement switches can be turned on
+// long after an image was built, so signed modules are never stripped.
 var moduleSignatureMarker = []byte("~Module signature appended~\n")
 
 func stripElf(in []byte, stripAll bool) ([]byte, error) {
@@ -187,7 +192,7 @@ func (img *Image) AppendContent(dest string, osMode os.FileMode, content []byte)
 				doStrip = false
 			}
 			if doStrip && bytes.HasSuffix(content, moduleSignatureMarker) {
-				// strip rewrites the ELF, discarding everything past it, and reports success
+				// strip discards everything past the ELF, signature included, and reports success
 				debug("%s is signed, skipping strip to keep the signature", dest)
 				doStrip = false
 			}
@@ -203,6 +208,11 @@ func (img *Image) AppendContent(dest string, osMode os.FileMode, content []byte)
 				} else {
 					content = stripped
 				}
+			}
+
+			if img.signedModulesRequired && strings.HasPrefix(dest, imageModulesDir) &&
+				!bytes.HasSuffix(content, moduleSignatureMarker) {
+				warning("%s is not signed and this kernel refuses unsigned modules; the boot will fail at finit_module", dest)
 			}
 
 			if err := img.AppendElfDependencies(ef); err != nil {

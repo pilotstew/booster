@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -539,6 +540,70 @@ func appendModuleSignature(content []byte) []byte {
 	out = append(out, descriptor...)
 
 	return append(out, "~Module signature appended~\n"...)
+}
+
+// captureStdout collects what the generator prints, which is where warning()
+// goes.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	saved := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = saved }()
+
+	fn()
+	require.NoError(t, w.Close())
+
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	return string(out)
+}
+
+// TestUnsignedModuleWarnsWhenKernelEnforces covers the case booster cannot fix
+// for the user: a module that was never signed, packed for a kernel that refuses
+// unsigned modules. Silence there means an image that fails at finit_module with
+// nothing in the build output pointing at why.
+func TestUnsignedModuleWarnsWhenKernelEnforces(t *testing.T) {
+	prepareAssets(t)
+	content, err := os.ReadFile("assets/test_module.ko")
+	require.NoError(t, err)
+
+	img, err := NewImage(filepath.Join(t.TempDir(), "booster.img"), "none", false)
+	require.NoError(t, err)
+	defer img.Cleanup()
+	img.signedModulesRequired = true
+
+	out := captureStdout(t, func() {
+		require.NoError(t, img.AppendContent(imageModulesDir+"nosig.ko", 0o644, content))
+		require.NoError(t, img.AppendContent(imageModulesDir+"withsig.ko", 0o644, appendModuleSignature(content)))
+	})
+
+	require.Contains(t, out, "nosig.ko is not signed")
+	require.NotContains(t, out, "withsig.ko is not signed")
+}
+
+func TestKernelEnforcesModuleSignatures(t *testing.T) {
+	dir := t.TempDir()
+	require.False(t, kernelEnforcesModuleSignatures(dir, "matestkernel"), "no config means no claim either way")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config"),
+		[]byte("CONFIG_MODULE_SIG=y\n# CONFIG_MODULE_SIG_FORCE is not set\n"), 0o644))
+	require.False(t, kernelEnforcesModuleSignatures(dir, "matestkernel"), "signing without forcing is not enforcement")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config"),
+		[]byte("CONFIG_MODULE_SIG=y\nCONFIG_MODULE_SIG_FORCE=y\n"), 0o644))
+	require.True(t, kernelEnforcesModuleSignatures(dir, "matestkernel"))
+
+	// the kernel build directory is where a distribution that ships no separate
+	// config file keeps it
+	build := filepath.Join(dir, "build")
+	require.NoError(t, os.MkdirAll(build, 0o755))
+	require.NoError(t, os.Remove(filepath.Join(dir, "config")))
+	require.NoError(t, os.WriteFile(filepath.Join(build, ".config"), []byte("CONFIG_MODULE_SIG_FORCE=y\n"), 0o644))
+	require.True(t, kernelEnforcesModuleSignatures(dir, "matestkernel"))
 }
 
 func TestStripKeepsModuleSignatures(t *testing.T) {
