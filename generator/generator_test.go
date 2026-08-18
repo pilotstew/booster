@@ -585,6 +585,51 @@ func TestUnsignedModuleWarnsWhenKernelEnforces(t *testing.T) {
 	require.NotContains(t, out, "withsig.ko is not signed")
 }
 
+// TestStripKeepsKernelConsumedSections pins the dracut-aligned split: a module
+// gives up debug info only, because the kernel reads its ORC unwind tables, BTF
+// and build-id note out of the file, and an image whose modules cannot be
+// unwound through is an image whose panics cannot be read.
+func TestStripKeepsKernelConsumedSections(t *testing.T) {
+	opts := options{
+		universal:        true,
+		stripBinaries:    true,
+		prepareModulesAt: []string{"kernel/fs/mod.ko"},
+		unpackImage:      true,
+	}
+	createTestInitRamfs(t, &opts)
+
+	packed := opts.workDir + "/image.unpacked/usr/lib/modules/mod.ko"
+	sections := readelfSections(t, packed)
+	for _, want := range []string{".orc_unwind", ".orc_unwind_ip", ".BTF", ".note.gnu.build-id"} {
+		require.Contains(t, sections, want, "the kernel reads %s out of the module file", want)
+	}
+	require.NotContains(t, sections, ".debug_info", "debug info is what stripping a module is for")
+
+	// and the module really was processed rather than copied whole
+	original, err := os.Stat("assets/test_module.ko")
+	require.NoError(t, err)
+	stripped, err := os.Stat(packed)
+	require.NoError(t, err)
+	require.Less(t, stripped.Size(), original.Size())
+}
+
+func readelfSections(t *testing.T, path string) []string {
+	t.Helper()
+
+	out, err := exec.Command("readelf", "-SW", path).Output()
+	require.NoError(t, err)
+
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "["))
+		if len(f) > 2 && strings.HasPrefix(f[1], ".") {
+			names = append(names, f[1])
+		}
+	}
+
+	return names
+}
+
 func TestKernelEnforcesModuleSignatures(t *testing.T) {
 	dir := t.TempDir()
 	require.False(t, kernelEnforcesModuleSignatures(dir, "matestkernel"), "no config means no claim either way")
