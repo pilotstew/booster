@@ -38,6 +38,7 @@ type generatorConfig struct {
 	readHostModules         func(kernelVer string) (set, error)
 	readModprobeOptions     func() (map[string]string, error)
 	stripBinaries           bool
+	stripExtraSections      []string
 	enableLVM               bool
 	enableMdraid            bool
 	mdraidConfigPath        string
@@ -124,6 +125,7 @@ func generateInitRamfs(conf *generatorConfig) error {
 	}
 	defer img.Cleanup()
 	img.signedModulesRequired = kernelEnforcesModuleSignatures(conf.modulesDir, conf.kernelVersion)
+	img.stripExtraSections = conf.stripExtraSections
 
 	if err := appendCompatibilitySymlinks(img); err != nil {
 		return err

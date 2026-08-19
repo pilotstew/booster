@@ -62,6 +62,7 @@ type options struct {
 	modprobeOptions              map[string]string
 	expectError                  string
 	stripBinaries                bool
+	stripExtraSections           []string
 	enableLVM                    bool
 	vConsoleConfig, localeConfig string
 	enableMdraid                 bool
@@ -196,6 +197,7 @@ func createTestInitRamfs(t *testing.T, o *options) {
 		extraFiles:          o.extraFiles,
 		modules:             o.extraModules,
 		stripBinaries:       o.stripBinaries,
+		stripExtraSections:  o.stripExtraSections,
 		enableLVM:           o.enableLVM,
 		enableMdraid:        o.enableMdraid,
 		mdraidConfigPath:    o.mdraidConfigPath,
@@ -628,6 +630,36 @@ func readelfSections(t *testing.T, path string) []string {
 	}
 
 	return names
+}
+
+// TestStripExtraSections covers the escape hatch for people who want the
+// aggressive behaviour back: sections named in strip_extra_sections are removed
+// from modules on top of debug info, and userspace files are left alone.
+func TestStripExtraSections(t *testing.T) {
+	require.Equal(t, []string{"--strip-debug"}, stripArgs(false, true, nil))
+	require.Equal(t,
+		[]string{"--strip-debug", "-R", "*orc_unwind*", "-R", ".BTF"},
+		stripArgs(false, true, []string{"*orc_unwind*", ".BTF"}))
+
+	// userspace files are unaffected: the list is about modules
+	require.NotContains(t, stripArgs(true, false, []string{".BTF"}), ".BTF")
+
+}
+
+func TestStripExtraSectionsReachTheImage(t *testing.T) {
+	opts := options{
+		universal:          true,
+		stripBinaries:      true,
+		stripExtraSections: []string{"*orc_unwind*", ".BTF"},
+		prepareModulesAt:   []string{"kernel/fs/mod.ko"},
+		unpackImage:        true,
+	}
+	createTestInitRamfs(t, &opts)
+
+	sections := readelfSections(t, opts.workDir+"/image.unpacked/usr/lib/modules/mod.ko")
+	require.NotContains(t, sections, ".orc_unwind")
+	require.NotContains(t, sections, ".BTF")
+	require.Contains(t, sections, ".note.gnu.build-id", "only the listed sections go")
 }
 
 func TestKernelEnforcesModuleSignatures(t *testing.T) {

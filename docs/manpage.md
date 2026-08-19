@@ -70,6 +70,8 @@ serialize_tokens:
 
  * `strip` is a boolean flag that enables stripping of ELF files before adding them to the image. Binaries, shared libraries and kernel modules are examples of ELF files that get processed with the strip UNIX tool. The default is `false`. Signed kernel modules are skipped.
 
+ * `strip_extra_sections` is a comma-separated list of ELF sections to remove from kernel modules in addition to debug info, for example `*orc_unwind*, .BTF`. Names are passed to `strip -R`. Only applies when `strip` is set.
+
  * `extra_files` is a comma-separated list of extra files to add to the image. If an item starts with slash ("/") then it is considered an absolute path. Otherwise it is a path relative to /usr/bin. If the item is a directory then its content is added recursively. There are a few special cases:
     * adding `busybox` to the image enables an emergency shell in case of a panic during the boot process.
     * adding `fsck` enables boot time filesystem check. It also requires filesystem specific binary called `fsck.$rootfstype` to be added to the image. Filesystems are corrected automatically and if it fails then boot stops and it is the responsibility of the user to fix the root filesystem.

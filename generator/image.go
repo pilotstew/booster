@@ -28,6 +28,8 @@ type Image struct {
 	stripBinaries bool
 
 	signedModulesRequired bool
+
+	stripExtraSections []string
 }
 
 func NewImage(path string, compression string, stripBinaries bool) (*Image, error) {
@@ -131,9 +133,14 @@ var moduleSignatureMarker = []byte("~Module signature appended~\n")
 
 // stripArgs mirrors dracut: modules give up debug info only, because the kernel
 // reads ORC unwind tables, BTF and the build-id note out of the module file.
-func stripArgs(stripAll, isModule bool) []string {
+func stripArgs(stripAll, isModule bool, extraSections []string) []string {
 	if isModule {
-		return []string{"--strip-debug"}
+		args := []string{"--strip-debug"}
+		for _, section := range extraSections {
+			args = append(args, "-R", section)
+		}
+
+		return args
 	}
 
 	args := []string{"-R", ".note.*", "-R", ".comment", "-R", ".go.buildinfo", "-R", ".gosymtab"}
@@ -144,7 +151,7 @@ func stripArgs(stripAll, isModule bool) []string {
 	return append(args, "--strip-unneeded")
 }
 
-func stripElf(in []byte, stripAll, isModule bool) ([]byte, error) {
+func stripElf(in []byte, stripAll, isModule bool, extraSections []string) ([]byte, error) {
 	t, err := os.CreateTemp("", "booster.strip")
 	if err != nil {
 		return nil, err
@@ -157,7 +164,7 @@ func stripElf(in []byte, stripAll, isModule bool) ([]byte, error) {
 	}
 	_ = t.Close()
 
-	args := append(stripArgs(stripAll, isModule), t.Name())
+	args := append(stripArgs(stripAll, isModule, extraSections), t.Name())
 	cmd := exec.Command("strip", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -208,7 +215,7 @@ func (img *Image) AppendContent(dest string, osMode os.FileMode, content []byte)
 			if doStrip {
 				// do not use --strip-all for shared libs as it fails to load
 				isBinary := ef.Type == elf.ET_EXEC
-				stripped, stripErr := stripElf(content, isBinary, strings.HasPrefix(dest, imageModulesDir))
+				stripped, stripErr := stripElf(content, isBinary, strings.HasPrefix(dest, imageModulesDir), img.stripExtraSections)
 				if stripErr != nil {
 					// Strip is an optional size optimisation; a failure (e.g. LTO
 					// modules, unusual toolchains) must not abort the build.
