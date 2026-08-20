@@ -57,6 +57,11 @@ var assetGenerators = map[string]assetGenerator{
 		"HDRDEV_UUID=e2d8f1a3-7b4c-4e9d-a1b2-3c4d5e6f7a8b",
 		"HEADER_INPUT=assets/luks2.detached_header.hdr",
 	}},
+	// Static half of the ESP autodiscovery images; esp.sh writes the per-test
+	// kernel, initramfs and GPT attribute into a copy of it.  Only the LUKS
+	// base needs root: putting a filesystem in an encrypted volume opens it.
+	"esp-base.img":        {"esp_base.sh", nil},
+	"esp-base-luks.img":   {"esp_base.sh", []string{"ENABLE_LUKS=1"}},
 	"gpt.img":             {"gpt.sh", []string{"FS_UUID=e5404205-ac6a-4e94-bb3b-14433d0af7d1", "FS_LABEL=newpart"}},
 	"gpt_4ksector.img":    {"gpt_4ksector.sh", nil},
 	"lvm.img":             {"lvm.sh", []string{"FS_UUID=74c9e30c-506f-4106-9f61-a608466ef29c", "FS_LABEL=lvmr00t"}},
