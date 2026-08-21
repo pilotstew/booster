@@ -73,6 +73,11 @@ func testArchLinux(t *testing.T, opts Opts, prompt, password string) {
 
 	vm, err := buildVmInstance(t, opts)
 	require.NoError(t, err)
+
+	// Wait for the guest to say sshd is listening rather than dialling a port
+	// qemu has bound but cannot yet deliver to.  A resumed VM does not repeat
+	// this, so only a fresh boot can be gated on it.
+	require.NoError(t, vm.ConsoleExpect("Started OpenSSH Daemon"))
 	defer vm.Shutdown()
 
 	if prompt != "" {
@@ -83,9 +88,14 @@ func testArchLinux(t *testing.T, opts Opts, prompt, password string) {
 	config := &ssh.ClientConfig{
 		User:            "root",
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		// qemu binds the forwarded port as soon as it starts, so a dial made
+		// before the guest's sshd exists connects and then waits on a guest
+		// that cannot answer.  Without a timeout that one call blocks for the
+		// whole boot and the retry loop never gets to retry.
+		Timeout: 10 * time.Second,
 	}
 
-	conn := dialSSHWithRetry(t, sshAddr, config, 60*time.Second)
+	conn := dialSSHWithRetry(t, sshAddr, config, opts.vmTimeout)
 	defer conn.Close()
 
 	sess, err := conn.NewSession()
@@ -122,14 +132,17 @@ func TestArchLinuxHibernate(t *testing.T) {
 			}
 
 			controller := ""
-			ext4RootDevice := "/dev/sda"
 			if pkg == "linux-xanmod" {
 				// xanmod compiles nvme as a standalone module
 				// use it as an opportunity to verify 'nvme as a root device' functionality
 				controller = "nvme,serial=boostfoo"
-				ext4RootDevice = "/dev/nvme0n1"
 			}
 			sshParams, sshAddr := sshForwardParams(t)
+			// This test attaches a second disk for swap, and the two race for
+			// /dev/sda: when the swap disk wins, root= names a swap partition
+			// and the boot waits for a root filesystem that never appears.
+			// Name the root by UUID, which does not depend on probe order.
+			rootRef := "UUID=" + fsUUID(t, "assets/archlinux.ext4.raw")
 			opts := Opts{
 				kernelVersion: ver,
 				modules:       "e1000",
@@ -141,19 +154,28 @@ func TestArchLinuxHibernate(t *testing.T) {
 				},
 				// Full distro userspace, and it boots twice; see testArchLinux.
 				vmTimeout:  120 * time.Second,
-				kernelArgs: []string{"root=" + ext4RootDevice, "resume=UUID=5ec330f5-ac5e-48d2-98b6-87fd3e9b272f", "rw"},
+				kernelArgs: []string{"root=" + rootRef, "resume=UUID=5ec330f5-ac5e-48d2-98b6-87fd3e9b272f", "rw"},
 			}
 
 			vm, err := buildVmInstance(t, opts)
 			require.NoError(t, err)
-			// defer vm.Shutdown()
+			// The guest powers itself off when it hibernates, so this is a no-op
+			// on the happy path.  It matters when the test fails before that:
+			// without it the VM outlives the test, holding the host port its
+			// forward is bound to and the disks it was given.
+			defer vm.Kill()
+
+			// See testArchLinux: gate the dial on the guest, not on a timer.
+			require.NoError(t, vm.ConsoleExpect("Started OpenSSH Daemon"))
 
 			config := &ssh.ClientConfig{
 				User:            "root",
 				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				// See the note in testArchLinux.
+				Timeout: 10 * time.Second,
 			}
 
-			conn := dialSSHWithRetry(t, sshAddr, config, 60*time.Second)
+			conn := dialSSHWithRetry(t, sshAddr, config, opts.vmTimeout)
 			defer conn.Close()
 
 			sess, err := conn.NewSession()
@@ -178,7 +200,13 @@ func TestArchLinuxHibernate(t *testing.T) {
 
 			require.NoError(t, vm2.ConsoleExpect("PM: Image loading done"))
 
-			conn = dialSSHWithRetry(t, sshAddr, config, 60*time.Second)
+			// Image loading done only means the image is in memory: tasks are
+			// still frozen for another ~400ms and sshd cannot answer until they
+			// thaw.  hibernation exit follows the thaw by ~6ms, so waiting for
+			// it closes that window for nothing.
+			require.NoError(t, vm2.ConsoleExpect("PM: hibernation: hibernation exit"))
+
+			conn = dialSSHWithRetry(t, sshAddr, config, opts.vmTimeout)
 			defer conn.Close()
 
 			sess, err = conn.NewSession()
