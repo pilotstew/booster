@@ -51,7 +51,7 @@ func iowr(t, nr, size uintptr) uintptr {
 func ioctl(fd, cmd, ptr uintptr) error {
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, cmd, ptr)
 	if errno != 0 {
-		return fmt.Errorf("ioctl(0x%x): %v", cmd, errno)
+		return fmt.Errorf("ioctl(0x%x): %w", cmd, errno)
 	}
 	return nil
 }
@@ -60,7 +60,7 @@ func ioctl(fd, cmd, ptr uintptr) error {
 func ioctlCheckZero(fd, cmd, ptr uintptr) (bool, error) {
 	ret, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, cmd, ptr)
 	if errno != 0 {
-		return false, fmt.Errorf("ioctl(0x%x): %v", cmd, errno)
+		return false, fmt.Errorf("ioctl(0x%x): %w", cmd, errno)
 	}
 	return ret == 0, nil
 }
