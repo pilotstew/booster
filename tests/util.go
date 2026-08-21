@@ -152,6 +152,20 @@ func runSSHCommand(t *testing.T, conn *ssh.Client, command string) string {
 	return string(out)
 }
 
+// fsUUID reads a filesystem UUID out of an image file.  Tests that attach more
+// than one disk cannot name a root by kernel device: /dev/sda goes to whichever
+// disk the SCSI probe reaches first, and with two disks that order is not
+// stable across boots.
+func fsUUID(t *testing.T, image string) string {
+	t.Helper()
+
+	out, err := exec.Command("blkid", "-o", "value", "-s", "UUID", image).Output()
+	require.NoError(t, err, "blkid %s", image)
+	uuid := strings.TrimSpace(string(out))
+	require.NotEmpty(t, uuid, "no filesystem UUID in %s", image)
+	return uuid
+}
+
 func shell(script string, env ...string) error {
 	sh := exec.Command("bash", "-o", "errexit", script)
 	sh.Env = append(os.Environ(), env...)
