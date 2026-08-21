@@ -9,7 +9,7 @@ require (
 	github.com/anatol/luks.go v0.0.0-20260615185044-2658459c8ca5
 	github.com/anatol/smart.go v0.0.0-20260427185427-04c4679efd4e
 	github.com/anatol/tang.go v0.0.0-20260314012254-926d9c91008f
-	github.com/anatol/vmtest v0.0.0-20260509163454-0d3e5bd9399c
+	github.com/anatol/vmtest v0.0.0-20260821234203-b03b9c2e87b4
 	github.com/cavaliergopher/cpio v1.0.1
 	github.com/google/go-tpm v0.9.8
 	github.com/google/renameio/v2 v2.0.2
