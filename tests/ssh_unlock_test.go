@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,16 +46,58 @@ func sshForwardParams(t *testing.T) (params []string, addr string) {
 func dialSSHWithRetry(t *testing.T, addr string, config *gossh.ClientConfig, timeout time.Duration) *gossh.Client {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
+	// Count what each attempt hit: "refused" means qemu is not forwarding yet,
+	// "reset" means it forwarded to a guest port with nothing listening, and a
+	// handshake error means sshd answered but did not finish.
+	kinds := map[string]int{}
+	attempts := 0
+	started := time.Now()
+
+	deadline := started.Add(timeout)
 	for {
 		conn, err := gossh.Dial("tcp", addr, config)
 		if err == nil {
+			if attempts > 0 {
+				t.Logf("ssh.Dial to %s succeeded after %d retries in %v %v", addr, attempts, time.Since(started).Round(time.Second), kinds)
+			}
 			return conn
 		}
+		attempts++
+		kinds[classifyDialError(err)]++
+
 		if time.Now().After(deadline) {
-			require.NoError(t, err, "ssh.Dial never succeeded within %v", timeout)
+			// One last plain TCP connect: it separates "nothing is listening on
+			// the host side" from "the forward works and the guest is not
+			// answering", which the ssh error alone cannot distinguish.
+			tcpState := "connect ok"
+			if c, tcpErr := net.DialTimeout("tcp", addr, 5*time.Second); tcpErr != nil {
+				tcpState = tcpErr.Error()
+			} else {
+				_ = c.Close()
+			}
+			require.NoError(t, err, "ssh.Dial to %s never succeeded within %v: %d attempts %v, raw tcp: %s",
+				addr, timeout, attempts, kinds, tcpState)
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// classifyDialError buckets a dial failure by what it says about the guest.
+func classifyDialError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return "refused"
+	case strings.Contains(msg, "connection reset"):
+		return "reset"
+	case strings.Contains(msg, "handshake"):
+		return "handshake"
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "i/o timeout"):
+		return "timeout"
+	case strings.Contains(msg, "EOF"):
+		return "eof"
+	default:
+		return "other"
 	}
 }
 

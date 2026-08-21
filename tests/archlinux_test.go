@@ -74,10 +74,6 @@ func testArchLinux(t *testing.T, opts Opts, prompt, password string) {
 	vm, err := buildVmInstance(t, opts)
 	require.NoError(t, err)
 
-	// Wait for the guest to say sshd is listening rather than dialling a port
-	// qemu has bound but cannot yet deliver to.  A resumed VM does not repeat
-	// this, so only a fresh boot can be gated on it.
-	require.NoError(t, vm.ConsoleExpect("Started OpenSSH Daemon"))
 	defer vm.Shutdown()
 
 	if prompt != "" {
@@ -85,13 +81,17 @@ func testArchLinux(t *testing.T, opts Opts, prompt, password string) {
 		require.NoError(t, vm.ConsoleWrite(password+"\n"))
 	}
 
+	// Gate on the guest saying sshd is listening.  This has to follow the
+	// passphrase: an encrypted root sits in the initramfs until it is typed, so
+	// waiting for sshd first would deadlock.  A resumed VM does not repeat the
+	// message, so only a fresh boot can be gated on it.
+	require.NoError(t, vm.ConsoleExpect("Started OpenSSH Daemon"))
+
 	config := &ssh.ClientConfig{
 		User:            "root",
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		// qemu binds the forwarded port as soon as it starts, so a dial made
-		// before the guest's sshd exists connects and then waits on a guest
-		// that cannot answer.  Without a timeout that one call blocks for the
-		// whole boot and the retry loop never gets to retry.
+		// Without a timeout, a dial made before the guest's sshd exists blocks
+		// for the whole boot and the retry loop never gets to retry.
 		Timeout: 10 * time.Second,
 	}
 
