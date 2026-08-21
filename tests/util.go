@@ -412,6 +412,28 @@ func defaultKernelVersion(t *testing.T) string {
 	return kernelVersions[pkgbases[0]]
 }
 
+// testLogWriter forwards VM output to t.Log, one line per call.  Go buffers
+// t.Log per test and prints it under that test's heading, so a failing VM's
+// console stays contiguous and attributed instead of interleaved.
+type testLogWriter struct {
+	t   *testing.T
+	buf []byte
+}
+
+func (w *testLogWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := strings.TrimRight(string(w.buf[:i]), "\r")
+		w.buf = w.buf[i+1:]
+		w.t.Log(line)
+	}
+	return len(p), nil
+}
+
 func buildVmInstance(t *testing.T, opts Opts) (*vmtest.Qemu, error) {
 	require.True(t, opts.disk == "" || len(opts.disks) == 0, "Opts.disk and Opts.disks cannot be specified together")
 	require.False(t, opts.asIso && opts.containsESP)
@@ -500,6 +522,7 @@ func buildVmInstance(t *testing.T, opts Opts) (*vmtest.Qemu, error) {
 		OperatingSystem: vmtest.OS_LINUX,
 		Disks:           disks,
 		Verbose:         testing.Verbose(),
+		Output:          &testLogWriter{t: t},
 		Timeout:         vmTimeout,
 	}
 	if isoFile != "" {
