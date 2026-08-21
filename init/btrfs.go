@@ -57,30 +57,36 @@ func btrfsScanDevice(dev string) error {
 	return ioctl(controlFile.Fd(), BTRFS_IOC_SCAN_DEV, uintptr(unsafe.Pointer(args)))
 }
 
-// Wait until all devices of a multiple-device filesystem are scanned and registered within the kernel module
-func waitForBtrfsDevicesReady(dev string) error {
+// A variable so a test can shorten it.
+var btrfsTimeout = 10 * time.Minute
+
+// btrfsDevicesReady reports whether every member of dev's volume has been
+// registered.  Not-ready and error mean different things: the ioctl answers 1
+// while the volume is still assembling, but returns an errno when it cannot
+// scan dev at all, which waiting will not fix.
+var btrfsDevicesReady = func(dev string) (bool, error) {
 	controlFile, args, err := openBtrfsControl(dev)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer controlFile.Close()
 
-	/* these three should all be uintptr */
-	ioctlFd := controlFile.Fd()
-	BTRFS_IOC_DEVICES_READY := ior(BTRFS_IOCTL_MAGIC, BTRFS_IOCTL_NR_DEVICES_READY, unsafe.Sizeof(*args))
-	ptrBtrfsIoctlVolArgs := uintptr(unsafe.Pointer(args))
+	cmd := ior(BTRFS_IOCTL_MAGIC, BTRFS_IOCTL_NR_DEVICES_READY, unsafe.Sizeof(*args))
+	return ioctlCheckZero(controlFile.Fd(), cmd, uintptr(unsafe.Pointer(args)))
+}
 
+// Wait until all devices of a multiple-device filesystem are scanned and registered within the kernel module
+func waitForBtrfsDevicesReady(dev string) error {
 	/* prepare to wait */
-	const btrfsTimeout time.Duration = 10 * time.Minute
 	timeNow := time.Now()
 	timeStart := timeNow
 	timeEnd := timeStart.Add(btrfsTimeout)
 
 	/* actually wait */
 	for timeNow.Before(timeEnd) {
-		ready, err := ioctlCheckZero(ioctlFd, BTRFS_IOC_DEVICES_READY, ptrBtrfsIoctlVolArgs)
+		ready, err := btrfsDevicesReady(dev)
 		if err != nil {
-			return err
+			return fmt.Errorf("btrfs: cannot scan %v to see whether its volume is complete: %w", dev, err)
 		}
 		timeElapsed := timeNow.Sub(timeStart)
 		if ready {
