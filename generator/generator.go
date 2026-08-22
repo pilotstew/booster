@@ -56,8 +56,9 @@ type generatorConfig struct {
 	enableVirtualConsole     bool
 	vconsolePath, localePath string
 
-	crypttabFile string // path to host crypttab; empty = use /etc/crypttab
-	enableFido2  bool
+	crypttabFile        string // path to host crypttab; empty = use /etc/crypttab
+	enableFido2         bool
+	explicitEnableFido2 bool
 
 	serializeTokens bool // dispatch LUKS tokens serially instead of concurrently; default false
 	tokenTimeout    int  // device-level keyboard-fallback timer (seconds); 0 = unset
@@ -165,9 +166,12 @@ func generateInitRamfs(conf *generatorConfig) error {
 		pluginPath := filepath.Join(filepath.Dir(conf.initBinary), "fido2plugin.so")
 		content, err := os.ReadFile(pluginPath)
 		if err != nil {
-			return fmt.Errorf("fido2 plugin %s: %v", pluginPath, err)
-		}
-		if err := img.AppendContent("/usr/lib/booster/fido2plugin.so", 0o755, content); err != nil {
+			if conf.explicitEnableFido2 {
+				return fmt.Errorf("fido2 plugin %s: %v", pluginPath, err)
+			}
+			warning("fido2 plugin %s unavailable, building without fido2: %v", pluginPath, err)
+			conf.enableFido2 = false
+		} else if err := img.AppendContent("/usr/lib/booster/fido2plugin.so", 0o755, content); err != nil {
 			return fmt.Errorf("fido2 plugin: %v", err)
 		}
 	}

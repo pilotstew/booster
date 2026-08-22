@@ -64,6 +64,9 @@ type options struct {
 	enableMdraid                 bool
 	mdraidConfigPath             string
 	enableFido2                  bool
+	crypttabContent              string // written to a file the build reads as /etc/crypttab
+	withoutFido2Plugin           bool   // enable fido2 but leave fido2plugin.so absent
+	expectErrorContains          string // for errors that embed a temporary path
 }
 
 func generateAliasesFile(aliases []alias) []byte {
@@ -163,12 +166,14 @@ func createTestInitRamfs(t *testing.T, o *options) {
 	}
 
 	initBinary := "/usr/bin/false"
-	if o.enableFido2 {
+	if o.enableFido2 || o.withoutFido2Plugin {
 		// fido2plugin.so is read from the same directory as the init binary.
 		// Create dummy stand-ins in the work directory so the generator can find them.
 		initBinary = wd + "/init"
 		require.NoError(t, os.WriteFile(initBinary, []byte("dummy"), 0o755))
-		require.NoError(t, os.WriteFile(wd+"/fido2plugin.so", []byte("dummy"), 0o755))
+		if !o.withoutFido2Plugin {
+			require.NoError(t, os.WriteFile(wd+"/fido2plugin.so", []byte("dummy"), 0o755))
+		}
 	}
 
 	conf := generatorConfig{
@@ -188,7 +193,12 @@ func createTestInitRamfs(t *testing.T, o *options) {
 		enableMdraid:        o.enableMdraid,
 		mdraidConfigPath:    o.mdraidConfigPath,
 		enableFido2:         o.enableFido2,
+		explicitEnableFido2: o.enableFido2,
 		crypttabFile:        "/dev/null", // tests run without root; avoid reading /etc/crypttab
+	}
+	if o.crypttabContent != "" {
+		conf.crypttabFile = wd + "/crypttab"
+		require.NoError(t, os.WriteFile(conf.crypttabFile, []byte(o.crypttabContent), 0o644))
 	}
 	if o.vConsoleConfig != "" {
 		conf.enableVirtualConsole = true
@@ -202,11 +212,15 @@ func createTestInitRamfs(t *testing.T, o *options) {
 	}
 
 	err := generateInitRamfs(&conf)
-	if o.expectError == "" {
-		require.NoError(t, err)
-	} else {
+	switch {
+	case o.expectError != "":
 		require.Equal(t, o.expectError, err.Error())
 		return
+	case o.expectErrorContains != "":
+		require.ErrorContains(t, err, o.expectErrorContains)
+		return
+	default:
+		require.NoError(t, err)
 	}
 
 	require.NoError(t, verifyCompressedFile(compression, wd+"/booster.img"))
@@ -663,4 +677,40 @@ func TestDeterministicImage(t *testing.T) {
 	b2, err := os.ReadFile(img2)
 	require.NoError(t, err)
 	require.Equal(t, b1, b2, "image must be byte-for-byte identical across builds")
+}
+
+func TestFido2PluginUnavailable(t *testing.T) {
+	// A crypttab entry naming fido2-device= turns the plugin on by itself, so a
+	// host that has one but no fido2plugin.so installed cannot build an image at
+	// all: every kernel update on that machine fails until the plugin appears.
+	// An explicit enable_fido2 is a different matter, since the user asked for
+	// something that cannot be delivered.
+	t.Run("auto-enabled from crypttab", func(t *testing.T) {
+		opts := options{
+			crypttabContent:    "cryptroot UUID=e5e8c1f0-6b7d-4b9e-8f1a-2c3d4e5f6a7b - fido2-device=auto,x-initrd.attach\n",
+			withoutFido2Plugin: true,
+			universal:          false,
+			prepareModulesAt:   []string{"kernel/drivers/hid/usbhid.ko", "kernel/drivers/hid/hid_generic.ko"},
+			hostModules:        []string{},
+			unpackImage:        true,
+		}
+		createTestInitRamfs(t, &opts)
+
+		_, err := os.Stat(opts.workDir + "/image.unpacked/usr/lib/booster/fido2plugin.so")
+		require.ErrorIs(t, err, os.ErrNotExist, "a plugin that does not exist must not be bundled")
+
+		// Standing down has to be complete: usbhid and hid_generic are pulled in
+		// only to serve a key this image now cannot use.
+		_, err = os.Stat(opts.workDir + "/image.unpacked/usr/lib/modules/usbhid.ko")
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("explicitly enabled", func(t *testing.T) {
+		opts := options{
+			enableFido2:         true,
+			withoutFido2Plugin:  true,
+			expectErrorContains: "fido2plugin.so",
+		}
+		createTestInitRamfs(t, &opts)
+	})
 }

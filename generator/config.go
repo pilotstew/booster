@@ -274,6 +274,7 @@ func readGeneratorConfig(file string) (*generatorConfig, error) {
 		conf.crypttabFile = u.CrypttabPath
 	}
 	conf.enableFido2 = u.EnableFido2
+	conf.explicitEnableFido2 = u.EnableFido2
 	if err := validatePasswordEcho(u.PasswordEcho); err != nil {
 		return nil, err
 	}
