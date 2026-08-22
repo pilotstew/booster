@@ -93,7 +93,7 @@ printf 'your-password' | argon2 "$(head -c16 /dev/urandom)" -id -t 3 -m 16 -p 4 
 
  * `enable_plymouth` is a flag that enables Plymouth boot splash support. When enabled, booster bundles the Plymouth daemon, plugins, theme, and fonts into the initramfs. GPU driver must be included in `modules_force_load`. The `quiet splash` kernel parameters are also required. Note that `booster.log=console` conflicts with Plymouth's graphical display; when console logging is active, Plymouth reverts to the details plugin (text-based fallback).
 
- * `enable_fido2` is a boolean flag that enables FIDO2 hardware token support.
+ * `enable_fido2` is a boolean flag that enables FIDO2 hardware token support. The build fails if `fido2plugin.so` is not installed alongside the init binary.
 
  * `serialize_tokens` makes booster try a device's LUKS tokens one at a time in ascending token-ID order instead of racing them concurrently (default off). A non-interactive token (TPM2 PCR-only, touchless FIDO2, clevis) enrolled before a PIN token then unlocks the device before the PIN prompt is reached. Each non-interactive token is bounded by a per-type timeout so a stuck one cannot hang the boot; on expiry booster moves to the next. PIN tokens are not bounded (empty-Enter already skips them). Keys:
 
@@ -279,7 +279,7 @@ Booster-specific behaviour for selected options:
 
  * **`header=`**: behavior depends on form, `/path` (plain absolute) bundles the file into the initramfs automatically, `/path:deviceref` mounts the device at boot and `/dev/...` uses the raw block device directly.
  
- * **`fido2-device=`**: makes the generator automatically bundle `fido2plugin.so` (like `enable_fido2: true` in config); accepted for compatibility as booster discovers enrolled tokens from the LUKS2 header and ignores the crypttab option value.
+ * **`fido2-device=`**: makes the generator automatically bundle `fido2plugin.so`; accepted for compatibility as booster discovers enrolled tokens from the LUKS2 header and ignores the crypttab option value. If the plugin is not installed the generator warns and builds the image without FIDO2, where `enable_fido2: true` would fail the build.
  
  * **`keyfile-timeout=`** / **`token-timeout=`**: accepts a bare integer (seconds) or any duration string accepted by Go's `time.ParseDuration` (e.g. `30s`, `2m`).
  
