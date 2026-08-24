@@ -284,6 +284,12 @@ go test ./...
 ```
 
 The `./tests` package contains QEMU integration tests and requires the host to have the needed boot and virtualization tooling installed.
+Build every missing test image first, needing root just once, and list what this host is missing to build the rest.
+A from-scratch build downloads full distro images and can run past `go test`'s 10-minute default timeout, so disable it:
+
+```shell
+go test ./tests -bootstrap -timeout=0
+```
 
 ## Credits
 

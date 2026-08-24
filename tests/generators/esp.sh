@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# tools: gdisk sgdisk mcopy
 
 # Writes the per-test half of the ESP autodiscovery image: the kernel, the
 # initramfs the test just built, its kernel options, and the GPT attribute under
