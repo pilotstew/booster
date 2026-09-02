@@ -325,7 +325,9 @@ func elfSectionContent(s *elf.Section) (string, error) {
 var elfLibDir = []string{"/usr/lib", "/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu"}
 
 // for a given library (e.g. libc.so.6) finds absolute path to the library file
-func elfPath(lib string) string {
+// loadable by an object of this class and machine. A multilib host carries the
+// same soname once per architecture, so the name alone does not identify a file.
+func elfPath(lib string, class elf.Class, machine elf.Machine) string {
 	if filepath.IsAbs(lib) {
 		return lib
 	}
@@ -333,11 +335,16 @@ func elfPath(lib string) string {
 	// TODO: use ef.DynString(elf.DT_RPATH) to calculate path to the loaded library
 	// or maybe we can parse /etc/ld.so.cache to get location for all libs?
 	for _, elfDir := range elfLibDir {
-		elfPath := filepath.Join(elfDir, lib)
-		if _, err := os.Stat(elfPath); err != nil {
+		p := filepath.Join(elfDir, lib)
+		candidate, err := elf.Open(p)
+		if err != nil {
 			continue
 		}
-		return elfPath
+		matches := candidate.Class == class && candidate.Machine == machine
+		candidate.Close()
+		if matches {
+			return p
+		}
 	}
 
 	return ""
@@ -359,7 +366,7 @@ func (img *Image) AppendElfDependencies(ef *elf.File) error {
 	}
 
 	for _, lib := range libs {
-		p := elfPath(lib)
+		p := elfPath(lib, ef.Class, ef.Machine)
 		if p == "" {
 			return fmt.Errorf("unable to find path to library %v", lib)
 		}
