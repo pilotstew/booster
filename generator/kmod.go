@@ -793,6 +793,34 @@ func readCompiledInComponents(kernelVersion string) (set, error) {
 	return result, nil
 }
 
+// kernelEnforcesModuleSignatures reports whether the target kernel refuses unsigned
+// modules. Only CONFIG_MODULE_SIG_FORCE is knowable at build time; sig_enforce=1 and
+// lockdown are chosen at boot, so a false answer must never gate dropping a signature.
+func kernelEnforcesModuleSignatures(modulesDir, kernelVersion string) bool {
+	candidates := []string{
+		filepath.Join(modulesDir, "config"),
+		filepath.Join(modulesDir, "build", ".config"),
+		"/boot/config-" + kernelVersion,
+	}
+
+	for _, p := range candidates {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			if s.Text() == "CONFIG_MODULE_SIG_FORCE=y" {
+				_ = f.Close()
+				return true
+			}
+		}
+		_ = f.Close()
+	}
+
+	return false
+}
+
 func readHostModules(kernelVersion string) (set, error) {
 	// Unlike /proc/modules (or `lsmod`) /sys/module provides information about builtin modules as well.
 	// And we need to check the built-in modules and try to add it to the image. This is needed because

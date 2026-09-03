@@ -26,6 +26,10 @@ type Image struct {
 	out           *cpio.Writer
 	contains      set // whether image contains the file
 	stripBinaries bool
+
+	signedModulesRequired bool
+
+	stripExtraSections []string
 }
 
 func NewImage(path string, compression string, stripBinaries bool) (*Image, error) {
@@ -121,7 +125,33 @@ func (img *Image) AppendDirEntry(dir string) error {
 	return err
 }
 
-func stripElf(in []byte, stripAll bool) ([]byte, error) {
+// moduleSignatureMarker terminates a module signature, which sits past the end
+// of the ELF (kernel scripts/sign-file.c). Whether losing it is fatal is decided
+// at boot, not here, and two of the three enforcement switches can be turned on
+// long after an image was built, so signed modules are never stripped.
+var moduleSignatureMarker = []byte("~Module signature appended~\n")
+
+// stripArgs mirrors dracut: modules give up debug info only, because the kernel
+// reads ORC unwind tables, BTF and the build-id note out of the module file.
+func stripArgs(stripAll, isModule bool, extraSections []string) []string {
+	if isModule {
+		args := []string{"--strip-debug"}
+		for _, section := range extraSections {
+			args = append(args, "-R", section)
+		}
+
+		return args
+	}
+
+	args := []string{"-R", ".note.*", "-R", ".comment", "-R", ".go.buildinfo", "-R", ".gosymtab"}
+	if stripAll {
+		return append(args, "--strip-all")
+	}
+
+	return append(args, "--strip-unneeded")
+}
+
+func stripElf(in []byte, stripAll, isModule bool, extraSections []string) ([]byte, error) {
 	t, err := os.CreateTemp("", "booster.strip")
 	if err != nil {
 		return nil, err
@@ -134,13 +164,7 @@ func stripElf(in []byte, stripAll bool) ([]byte, error) {
 	}
 	_ = t.Close()
 
-	args := []string{"-R", ".note.*", "-R", ".comment", "-R", ".go.buildinfo", "-R", ".gosymtab", "-R", "*orc_unwind*", "-R", ".BTF"}
-	if stripAll {
-		args = append(args, "--strip-all")
-	} else {
-		args = append(args, "--strip-unneeded")
-	}
-	args = append(args, t.Name())
+	args := append(stripArgs(stripAll, isModule, extraSections), t.Name())
 	cmd := exec.Command("strip", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -183,18 +207,28 @@ func (img *Image) AppendContent(dest string, osMode os.FileMode, content []byte)
 				// some firmware files are actually ELF but we should not run strip on them
 				doStrip = false
 			}
+			if doStrip && bytes.HasSuffix(content, moduleSignatureMarker) {
+				// strip discards everything past the ELF, signature included, and reports success
+				debug("%s is signed, skipping strip to keep the signature", dest)
+				doStrip = false
+			}
 			if doStrip {
-				// do not use --strip-all for modules/shared libs as it fails to load
+				// do not use --strip-all for shared libs as it fails to load
 				isBinary := ef.Type == elf.ET_EXEC
-				stripped, stripErr := stripElf(content, isBinary)
+				stripped, stripErr := stripElf(content, isBinary, strings.HasPrefix(dest, imageModulesDir), img.stripExtraSections)
 				if stripErr != nil {
 					// Strip is an optional size optimisation; a failure (e.g. LTO
-					// modules, signed modules, unusual toolchains) must not abort
-					// the build.  Warn and fall back to the unstripped binary.
+					// modules, unusual toolchains) must not abort the build.
+					// Warn and fall back to the unstripped binary.
 					warning("strip %s: %v — using unstripped", dest, stripErr)
 				} else {
 					content = stripped
 				}
+			}
+
+			if img.signedModulesRequired && strings.HasPrefix(dest, imageModulesDir) &&
+				!bytes.HasSuffix(content, moduleSignatureMarker) {
+				warning("%s is not signed and this kernel refuses unsigned modules; the boot will fail at finit_module", dest)
 			}
 
 			if err := img.AppendElfDependencies(ef); err != nil {

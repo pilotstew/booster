@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -180,6 +181,28 @@ func shell(script string, env ...string) error {
 func fileExists(file string) bool {
 	_, err := os.Stat(file)
 	return err == nil
+}
+
+// hostSignsModules reports whether this host's modules for kernelVersion are signed
+func hostSignsModules(kernelVersion string) bool {
+	var module string
+
+	dir := filepath.Join(kernelsDir, kernelVersion, "kernel")
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // an unreadable subtree just means we keep looking
+		}
+		module = path
+		return fs.SkipAll
+	})
+	if err != nil || module == "" {
+		return false
+	}
+
+	// modinfo handles whatever compression the distribution packs modules with
+	signer, err := exec.Command("modinfo", "-F", "signer", module).Output()
+
+	return err == nil && len(bytes.TrimSpace(signer)) > 0
 }
 
 func detectKernelVersion() (map[string]string, error) {

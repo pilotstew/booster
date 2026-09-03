@@ -221,6 +221,25 @@ func TestStripBinaries(t *testing.T) {
 	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
 }
 
+func TestStripKeepsModuleSignatures(t *testing.T) {
+	// the booting kernel trusts these modules' signatures; sig_enforce rejects any that lost one
+	kernelVersion := defaultKernelVersion(t)
+	if !hostSignsModules(kernelVersion) {
+		t.Skip("host kernel modules are unsigned, signature enforcement proves nothing here")
+	}
+
+	vm, err := buildVmInstance(t, Opts{
+		disk:          "assets/ext4.img",
+		stripBinaries: true,
+		kernelVersion: kernelVersion,
+		kernelArgs:    []string{"root=UUID=5c92fc66-7315-408b-b652-176dc554d370", "module.sig_enforce=1"},
+	})
+	require.NoError(t, err)
+	defer vm.Shutdown()
+
+	require.NoError(t, vm.ConsoleExpect("Hello, booster!"))
+}
+
 func TestNvme(t *testing.T) {
 	vm, err := buildVmInstance(t, Opts{
 		disks:      []vmtest.QemuDisk{{Path: "assets/gpt.img", Format: "raw", Controller: "nvme,serial=boostfoo"}},

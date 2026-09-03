@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +51,7 @@ type options struct {
 	universal                    bool
 	extraModules                 []string // modules to add to the image
 	prepareModulesAt             []string // copy a test module to these locations
+	signModulesAt                []string // same, with a module signature appended
 	unpackImage                  bool
 	hostModules                  []string // modules as found under /proc/modules
 	hostAliases                  []string // list of all aliases for the host devices
@@ -59,6 +62,7 @@ type options struct {
 	modprobeOptions              map[string]string
 	expectError                  string
 	stripBinaries                bool
+	stripExtraSections           []string
 	enableLVM                    bool
 	vConsoleConfig, localeConfig string
 	enableMdraid                 bool
@@ -138,6 +142,15 @@ func createTestInitRamfs(t *testing.T, o *options) {
 		require.NoError(t, exec.Command("cp", source, loc).Run())
 	}
 
+	for _, l := range o.signModulesAt {
+		loc := modulesDir + "/" + l
+		require.NoError(t, os.MkdirAll(filepath.Dir(loc), 0o755))
+
+		content, err := os.ReadFile("assets/test_module.ko")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(loc, appendModuleSignature(content), 0o644))
+	}
+
 	require.NoError(t, os.WriteFile(modulesDir+"/modules.builtin", generateBuiltinFile(o.builtin), 0o644))
 	require.NoError(t, os.WriteFile(modulesDir+"/modules.builtin.modinfo", []byte{}, 0o644))
 	require.NoError(t, os.WriteFile(modulesDir+"/modules.alias", generateAliasesFile(o.kernelAliases), 0o644))
@@ -184,6 +197,7 @@ func createTestInitRamfs(t *testing.T, o *options) {
 		extraFiles:          o.extraFiles,
 		modules:             o.extraModules,
 		stripBinaries:       o.stripBinaries,
+		stripExtraSections:  o.stripExtraSections,
 		enableLVM:           o.enableLVM,
 		enableMdraid:        o.enableMdraid,
 		mdraidConfigPath:    o.mdraidConfigPath,
@@ -514,6 +528,185 @@ func TestStripBinaries(t *testing.T) {
 	checkFileExistence(t, opts.workDir+"/image.unpacked/usr/lib/firmware/whiteheat.fw.zst")
 	checkFileExistence(t, opts.workDir+"/image.unpacked/usr/lib/firmware/usbdux_firmware.bin.zst")
 	checkFileExistence(t, opts.workDir+"/image.unpacked/usr/lib/firmware/rtw88/rtw8723d_fw.bin.zst")
+}
+
+// Shaped like a real signature (signature, 12 byte descriptor, marker) per the
+// kernel's scripts/sign-file.c, though only the marker matters to the generator.
+func appendModuleSignature(content []byte) []byte {
+	sig := bytes.Repeat([]byte{0xab}, 64)
+	descriptor := make([]byte, 12)
+	binary.BigEndian.PutUint32(descriptor[8:], uint32(len(sig)))
+
+	out := append([]byte{}, content...)
+	out = append(out, sig...)
+	out = append(out, descriptor...)
+
+	return append(out, "~Module signature appended~\n"...)
+}
+
+// captureStdout collects what the generator prints, which is where warning()
+// goes.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	saved := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = saved }()
+
+	fn()
+	require.NoError(t, w.Close())
+
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	return string(out)
+}
+
+// TestUnsignedModuleWarnsWhenKernelEnforces covers the case booster cannot fix
+// for the user: a module that was never signed, packed for a kernel that refuses
+// unsigned modules. Silence there means an image that fails at finit_module with
+// nothing in the build output pointing at why.
+func TestUnsignedModuleWarnsWhenKernelEnforces(t *testing.T) {
+	prepareAssets(t)
+	content, err := os.ReadFile("assets/test_module.ko")
+	require.NoError(t, err)
+
+	img, err := NewImage(filepath.Join(t.TempDir(), "booster.img"), "none", false)
+	require.NoError(t, err)
+	defer img.Cleanup()
+	img.signedModulesRequired = true
+
+	out := captureStdout(t, func() {
+		require.NoError(t, img.AppendContent(imageModulesDir+"nosig.ko", 0o644, content))
+		require.NoError(t, img.AppendContent(imageModulesDir+"withsig.ko", 0o644, appendModuleSignature(content)))
+	})
+
+	require.Contains(t, out, "nosig.ko is not signed")
+	require.NotContains(t, out, "withsig.ko is not signed")
+}
+
+// TestStripKeepsKernelConsumedSections pins the dracut-aligned split: a module
+// gives up debug info only, because the kernel reads its ORC unwind tables, BTF
+// and build-id note out of the file, and an image whose modules cannot be
+// unwound through is an image whose panics cannot be read.
+func TestStripKeepsKernelConsumedSections(t *testing.T) {
+	opts := options{
+		universal:        true,
+		stripBinaries:    true,
+		prepareModulesAt: []string{"kernel/fs/mod.ko"},
+		unpackImage:      true,
+	}
+	createTestInitRamfs(t, &opts)
+
+	packed := opts.workDir + "/image.unpacked/usr/lib/modules/mod.ko"
+	sections := readelfSections(t, packed)
+	for _, want := range []string{".orc_unwind", ".orc_unwind_ip", ".BTF", ".note.gnu.build-id"} {
+		require.Contains(t, sections, want, "the kernel reads %s out of the module file", want)
+	}
+	require.NotContains(t, sections, ".debug_info", "debug info is what stripping a module is for")
+
+	// and the module really was processed rather than copied whole
+	original, err := os.Stat("assets/test_module.ko")
+	require.NoError(t, err)
+	stripped, err := os.Stat(packed)
+	require.NoError(t, err)
+	require.Less(t, stripped.Size(), original.Size())
+}
+
+func readelfSections(t *testing.T, path string) []string {
+	t.Helper()
+
+	out, err := exec.Command("readelf", "-SW", path).Output()
+	require.NoError(t, err)
+
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "["))
+		if len(f) > 2 && strings.HasPrefix(f[1], ".") {
+			names = append(names, f[1])
+		}
+	}
+
+	return names
+}
+
+// TestStripExtraSections covers the escape hatch for people who want the
+// aggressive behaviour back: sections named in strip_extra_sections are removed
+// from modules on top of debug info, and userspace files are left alone.
+func TestStripExtraSections(t *testing.T) {
+	require.Equal(t, []string{"--strip-debug"}, stripArgs(false, true, nil))
+	require.Equal(t,
+		[]string{"--strip-debug", "-R", "*orc_unwind*", "-R", ".BTF"},
+		stripArgs(false, true, []string{"*orc_unwind*", ".BTF"}))
+
+	// userspace files are unaffected: the list is about modules
+	require.NotContains(t, stripArgs(true, false, []string{".BTF"}), ".BTF")
+
+}
+
+func TestStripExtraSectionsReachTheImage(t *testing.T) {
+	opts := options{
+		universal:          true,
+		stripBinaries:      true,
+		stripExtraSections: []string{"*orc_unwind*", ".BTF"},
+		prepareModulesAt:   []string{"kernel/fs/mod.ko"},
+		unpackImage:        true,
+	}
+	createTestInitRamfs(t, &opts)
+
+	sections := readelfSections(t, opts.workDir+"/image.unpacked/usr/lib/modules/mod.ko")
+	require.NotContains(t, sections, ".orc_unwind")
+	require.NotContains(t, sections, ".BTF")
+	require.Contains(t, sections, ".note.gnu.build-id", "only the listed sections go")
+}
+
+func TestKernelEnforcesModuleSignatures(t *testing.T) {
+	dir := t.TempDir()
+	require.False(t, kernelEnforcesModuleSignatures(dir, "matestkernel"), "no config means no claim either way")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config"),
+		[]byte("CONFIG_MODULE_SIG=y\n# CONFIG_MODULE_SIG_FORCE is not set\n"), 0o644))
+	require.False(t, kernelEnforcesModuleSignatures(dir, "matestkernel"), "signing without forcing is not enforcement")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config"),
+		[]byte("CONFIG_MODULE_SIG=y\nCONFIG_MODULE_SIG_FORCE=y\n"), 0o644))
+	require.True(t, kernelEnforcesModuleSignatures(dir, "matestkernel"))
+
+	// the kernel build directory is where a distribution that ships no separate
+	// config file keeps it
+	build := filepath.Join(dir, "build")
+	require.NoError(t, os.MkdirAll(build, 0o755))
+	require.NoError(t, os.Remove(filepath.Join(dir, "config")))
+	require.NoError(t, os.WriteFile(filepath.Join(build, ".config"), []byte("CONFIG_MODULE_SIG_FORCE=y\n"), 0o644))
+	require.True(t, kernelEnforcesModuleSignatures(dir, "matestkernel"))
+}
+
+func TestStripKeepsModuleSignatures(t *testing.T) {
+	// strip discards everything past the ELF, signature included, so a stripped
+	// module is refused once the kernel enforces signatures
+	opts := options{
+		universal:        true,
+		stripBinaries:    true,
+		prepareModulesAt: []string{"kernel/fs/unsigned.ko"},
+		signModulesAt:    []string{"kernel/fs/signed.ko"},
+		unpackImage:      true,
+	}
+	createTestInitRamfs(t, &opts)
+
+	source, err := os.ReadFile(opts.workDir + "/modules/kernel/fs/signed.ko")
+	require.NoError(t, err)
+	packed, err := os.ReadFile(opts.workDir + "/image.unpacked/usr/lib/modules/signed.ko")
+	require.NoError(t, err)
+	require.Equal(t, source, packed, "signed module must reach the image untouched")
+
+	// the unsigned module is still stripped, so this is not a blanket opt-out
+	unsigned, err := os.ReadFile(opts.workDir + "/image.unpacked/usr/lib/modules/unsigned.ko")
+	require.NoError(t, err)
+	original, err := os.ReadFile("assets/test_module.ko")
+	require.NoError(t, err)
+	require.Less(t, len(unsigned), len(original), "unsigned module should still be stripped")
 }
 
 func TestVirtualConsoleFontMap(t *testing.T) {
