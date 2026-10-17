@@ -1092,6 +1092,14 @@ func boost() error {
 
 	rootMounted.Add(1)
 
+	// Before udev: a device that arrives first needs these for its symlinks.
+	diskBy := []string{"id", "partuuid", "path", "uuid"}
+	for _, by := range diskBy {
+		if err := os.MkdirAll("/dev/disk/by-"+by, 0o755); err != nil {
+			return err
+		}
+	}
+
 	go func() { check(udevListener()) }()
 
 	forceLoadWg := loadModules(config.ModulesForceLoad...)
@@ -1109,13 +1117,6 @@ func boost() error {
 
 	if err := configureVirtualConsole(); err != nil {
 		return err
-	}
-
-	diskBy := []string{"id", "partuuid", "path", "uuid"}
-	for _, by := range diskBy {
-		if err := os.MkdirAll("/dev/disk/by-"+by, 0o755); err != nil {
-			return err
-		}
 	}
 
 	if config.Network != nil && config.Network.SshAuthorizedKeys != "" {
