@@ -19,6 +19,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
 	"github.com/insomniacslk/dhcp/iana"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
@@ -65,6 +66,14 @@ const (
 	dhcpAttempts = 40
 	// how long each DHCPv6 exchange waits for a reply
 	dhcp6ExchangeTimeout = 3 * time.Second
+	// how long to wait for a router advertisement before skipping DHCPv6
+	routerAdvertTimeout = 30 * time.Second
+)
+
+// IPv6 interface flags from include/net/if_inet6.h, reported in IFLA_INET6_FLAGS.
+const (
+	ifRaRcvd    = 0x20
+	ifRaManaged = 0x40
 )
 
 // leasedDNSServers holds the DNS servers every lease so far has handed out,
@@ -157,7 +166,79 @@ func dhcp6ClientID(hwaddr net.HardwareAddr) dhcpv6.DUID {
 	return &dhcpv6.DUIDLL{HWType: iana.HWTypeEthernet, LinkLayerAddr: hwaddr}
 }
 
+func readInet6Flags(index int) (uint32, error) {
+	req := nl.NewNetlinkRequest(unix.RTM_GETLINK, unix.NLM_F_DUMP)
+	req.AddData(nl.NewIfInfomsg(unix.AF_INET6))
+	msgs, err := req.Execute(unix.NETLINK_ROUTE, unix.RTM_NEWLINK)
+	if err != nil {
+		return 0, err
+	}
+	for _, m := range msgs {
+		ifi := nl.DeserializeIfInfomsg(m)
+		if int(ifi.Index) != index {
+			continue
+		}
+		attrs, err := nl.ParseRouteAttr(m[ifi.Len():])
+		if err != nil {
+			return 0, err
+		}
+		for _, a := range attrs {
+			if a.Attr.Type&nl.NLA_TYPE_MASK != unix.IFLA_PROTINFO {
+				continue
+			}
+			protinfo, err := nl.ParseRouteAttr(a.Value)
+			if err != nil {
+				return 0, err
+			}
+			for _, p := range protinfo {
+				if p.Attr.Type&nl.NLA_TYPE_MASK == unix.IFLA_INET6_FLAGS && len(p.Value) >= 4 {
+					return nl.NativeEndian().Uint32(p.Value), nil
+				}
+			}
+		}
+	}
+	return 0, fmt.Errorf("no IPv6 flags for interface %d", index)
+}
+
+// waitRouterManaged reports whether a router advertisement on the link sets the
+// Managed flag, i.e. hands addresses out with DHCPv6 (RFC 4861 section 4.2).
+func waitRouterManaged(inet6Flags func() (uint32, error)) (bool, error) {
+	unmanaged := 0
+	deadline := time.Now().Add(routerAdvertTimeout)
+	for time.Now().Before(deadline) {
+		flags, err := inet6Flags()
+		if err != nil {
+			return false, err
+		}
+		if flags&ifRaManaged != 0 {
+			return true, nil
+		}
+		// ndisc_router_discovery() sets IF_RA_RCVD before it stores the M flag,
+		// so a single read can land between the two writes.
+		if flags&ifRaRcvd != 0 {
+			unmanaged++
+			if unmanaged == 2 {
+				return false, nil
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false, nil
+}
+
 func runDhcp6(ifname string) error {
+	link, err := netlink.LinkByName(ifname)
+	if err != nil {
+		return err
+	}
+	managed, err := waitRouterManaged(func() (uint32, error) { return readInet6Flags(link.Attrs().Index) })
+	if err != nil {
+		return err
+	}
+	if !managed {
+		return fmt.Errorf("%s: no router advertises DHCPv6", ifname)
+	}
+
 	var reply *dhcpv6.Message
 	for range dhcpAttempts {
 		client, err := nclient6.New(ifname)
@@ -180,18 +261,22 @@ func runDhcp6(ifname string) error {
 		return fmt.Errorf("%s: no DHCPv6 reply received", ifname)
 	}
 
-	iana := reply.Options.OneIANA()
-	if iana == nil || len(iana.Options.Addresses()) == 0 {
-		return fmt.Errorf("%s: DHCPv6 reply has no address", ifname)
+	var leased net.IP
+	if iana := reply.Options.OneIANA(); iana != nil {
+		for _, a := range iana.Options.Addresses() {
+			if a.IPv6Addr.To4() == nil && a.IPv6Addr.IsGlobalUnicast() && a.ValidLifetime > 0 {
+				leased = a.IPv6Addr
+				break
+			}
+		}
 	}
-
-	link, err := netlink.LinkByName(ifname)
-	if err != nil {
-		return err
+	if leased == nil {
+		return fmt.Errorf("%s: DHCPv6 reply has no usable address", ifname)
 	}
+	debug("%s: DHCPv6 leased %s", ifname, leased)
 
 	addr := netlink.Addr{IPNet: &net.IPNet{
-		IP:   iana.Options.Addresses()[0].IPv6Addr,
+		IP:   leased,
 		Mask: net.CIDRMask(128, 128),
 	}}
 	if err := netlink.AddrAdd(link, &addr); err != nil {

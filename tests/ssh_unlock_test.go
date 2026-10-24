@@ -912,7 +912,8 @@ func TestSSHRemoteUnlockDHCPv6Only(t *testing.T) {
 // which leases only over DHCPv4, and one on passt, which leases only over
 // DHCPv6.  Both NICs run both protocols at once; each must end up configured
 // by the one its network answers, so sshd is reachable over IPv4 and IPv6
-// together.
+// together.  QEMU's router advertisement leaves the Managed flag clear, so
+// DHCPv6 must be skipped on eth0 rather than retried there.
 func TestSSHRemoteUnlockDualStack(t *testing.T) {
 	t.Parallel()
 
@@ -923,6 +924,7 @@ func TestSSHRemoteUnlockDualStack(t *testing.T) {
 	defer vm.Shutdown()
 
 	require.NoError(t, vm.ConsoleExpect("Enter passphrase for cryptroot:"))
+	require.NoError(t, vm.ConsoleExpect("eth0: no DHCPv6 lease: eth0: no router advertises DHCPv6"))
 
 	conn4 := dialSSHWithRetry(t, "127.0.0.1:"+hostPort, clientCfg, 60*time.Second)
 	require.NoError(t, conn4.Close())
